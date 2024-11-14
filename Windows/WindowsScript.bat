@@ -12,14 +12,6 @@ if %errorlevel%==0 (
 
 cls
 
-set /p answer=Have you answered all the forensics questions?[y/n]: 
-	if /I {%answer%}=={y} (
-		goto :menu
-	) else (
-		echo please go and answer them.
-		pause
-		exit
-	)
 	
 :menu
 	cls
