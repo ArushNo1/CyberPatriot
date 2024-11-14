@@ -25,11 +25,11 @@ cls
 	echo "                                                                             " 
 	echo "~~~~~~~~~~~~~~~~~~~~~Written by: Ethan Fowler Team-ByTE~~~~~~~~~~~~~~~~~~~~~~"
 	echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-	echo "1)Set user properties		2)Create a user"
-	echo "3)Disable a user		4)Change all passwords"
+	echo "1)Set user properties		3)RDP Security Layer Set to SSL
+	echo "2) Disable Autoplay		4)RDP netwrok level authentication enable
 	echo "5)Disable guest/admin		6)Set password policy
 	echo "7)Set lockout policy		8)Enable Firewall"
-	echo "9)Search for media files	10)Disable services
+	echo "9)Search for media files	        10)Disable services
 	echo "11)Turn on UAC			12)remote Desktop Config
 	echo "13)Enable auto update		14)Security options"
 	echo "15)Audit the machine		16)Edit groups"
@@ -37,9 +37,9 @@ cls
 	echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 	set /p answer=Please choose an option: 
 		if "%answer%"=="1" goto :userProp
-		if "%answer%"=="2" goto :createUser
-		if "%answer%"=="3" goto :disUser
-		if "%answer%"=="4" goto :passwd
+		if "%answer%"=="2" goto :secOpt
+		if "%answer%"=="3" goto :setRDPSecurity
+		if "%answer%"=="4" goto :setRDPNetworkLevelAuth
 		if "%answer%"=="5" goto :disGueAdm
 		if "%answer%"=="6" goto :passwdPol
 		if "%answer%"=="7" goto :lockout
@@ -66,21 +66,40 @@ cls
 
 	pause
 	goto :menu
+:secOpt
+echo Changing security options now.
 
-:passwd
-	echo Changing all user passwords
-	
-	endlocal
-	setlocal EnableExtensions
-	for /F "tokens=2* delims==" %%G in ('
-		wmic UserAccount where "status='ok'" get name >null
-	') do for %%g in (%%~G) do (
-		net user %%~g Cyb3rPatr!0t$
-		)
-	endlocal
-	setlocal enabledelayedexpansion	
+	rem Disable autoplay for all drives and all users
+	reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" /v NoDriveTypeAutoRun /t REG_DWORD /d 255 /f
+
+	rem Restrict CD ROM drive
+	reg ADD "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AllocateCDRoms /t REG_DWORD /d 1 /f
+
+	rem Automatic Admin logon
+	reg ADD "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_DWORD /d 0 /f
 	pause
 	goto :menu
+
+:setRDPSecurity
+echo Setting RDP Security Layer to SSL.
+
+	rem Set RDP Security Layer to SSL
+	reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v SecurityLayer /t REG_DWORD /d 2 /f
+
+	echo RDP Security Layer set to SSL successfully.
+	pause
+	goto :menu
+
+:setRDPNetworkLevelAuth
+echo Enabling RDP Network Level Authentication (NLA).
+
+	rem Enable RDP Network Level Authentication
+	reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 1 /f
+
+	echo RDP Network Level Authentication (NLA) enabled successfully.
+	pause
+	goto :menu
+
 	
 :disUser
 	cls
@@ -99,18 +118,6 @@ cls
 	pause
 	goto :menu
 	
-:createUser
-	set /p answer=Would you like to create a user?[y/n]: 
-	if /I "%answer%"=="y" (
-		set /p NAME=What is the user you would like to create?:
-		net user !NAME! /add
-		echo !NAME! has been added
-		pause 
-		goto :createUser
-	) 
-	if /I "%answer%"=="n" (
-		goto :menu
-	)
 
 :disGueAdm
 	rem Disables the guest account
