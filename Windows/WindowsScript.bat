@@ -26,7 +26,7 @@ cls
 	echo "~~~~~~~~~~~~~~~~~~~~~Written by: Ethan Fowler Team-ByTE~~~~~~~~~~~~~~~~~~~~~~"
 	echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 	echo "1)Set user properties		3)RDP Security Layer Set to SSL
-	echo "2) Disable Autoplay		4)RDP netwrok level authentication enable
+	echo "2)Disable Autoplay		4)RDP netwrok level authentication enable
 	echo "5)Disable guest/admin		6)Set password policy
 	echo "7)Set lockout policy		8)Enable Firewall"
 	echo "9)Search for media files	        10)Disable services
@@ -146,20 +146,27 @@ echo Enabling RDP Network Level Authentication (NLA).
 	rem Sets the password policy
 	rem Set complexity requirments
 	echo Setting pasword policies
-	net accounts /minpwlen:8
-	net accounts /maxpwage:60
-	net accounts /minpwage:10
+	net accounts /minpwlen:12
+	net accounts /maxpwage:90
+	net accounts /minpwage:30
 	net accounts /uniquepw:3
 	
 	pause
 	goto :menu
 	
 :lockout
-	rem Sets the lockout policy
-	echo Setting the lockout policy
-	net accounts /lockoutduration:30
-	net accounts /lockoutthreshold:3
+	echo Configuring Account Lockout Policies.
+
+	rem Set Account Lockout Threshold (number of failed login attempts before lockout)
+	net accounts /lockoutthreshold:10
+
+	rem Set Account Lockout Counter Reset (time in minutes to reset failed attempts counter)
 	net accounts /lockoutwindow:30
+
+	rem Set Account Lockout Duration (time in minutes the account remains locked out)
+	net accounts /lockoutduration:30
+
+	echo Account Lockout Policies configured successfully.
 
 	pause
 	goto :menu
@@ -349,6 +356,10 @@ echo Enabling RDP Network Level Authentication (NLA).
 	
 	rem Allow to use Machine ID for NTLM
 	reg ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v UseMachineId /t REG_DWORD /d 0 /f
+
+	# Set the Behavior of the elevation prompt for administrators in Admin Approval Mode to "Prompt for consent"
+New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 2 -PropertyType DWord -Force
+
 
 	rem Enables DEP
 	bcdedit.exe /set {current} nx AlwaysOn
