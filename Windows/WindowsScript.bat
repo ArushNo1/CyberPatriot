@@ -126,7 +126,7 @@ echo Enabling RDP Network Level Authentication (NLA).
 		echo Guest account is already disabled.
 	)
 	if %errorlevel%==1 (
-		net user guest Cyb3rPatr!0t$ /active:no
+		net user guest CyberPatriot2024$ /active:no
 	)
 	
 	rem Disables the Admin account
@@ -137,7 +137,7 @@ echo Enabling RDP Network Level Authentication (NLA).
 		goto :menu
 	)
 	if %errorlevel%==1 (
-		net user administrator Cyb3rPatr!0t$ /active:no
+		net user administrator CyberPatriot2024$ /active:no
 		pause
 		goto :menu
 	)

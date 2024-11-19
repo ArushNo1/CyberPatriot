@@ -332,7 +332,7 @@ echo "$LogTime uss: [$UserName]# Changing all the user passwords to Cyb3rPatr!0t
 	echo "$hUSER is a hidden user"
 	sed -i '/root/ d' users
 
-	PASS='Cyb3rPatr!0t$'
+	PASS='CyberPatriot2024$'
 	for x in `cat users`
 	do
 		echo -e "$PASS\n$PASS" | passwd $x >> output.log
