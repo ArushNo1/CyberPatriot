@@ -84,21 +84,22 @@ show_splash() {
     cat << "EOF"
     ╔═══════════════════════════════════════════════════════════╗
     ║                                                           ║
-    ║   ██████╗██╗   ██╗██████╗ ███████╗██████╗               ║
-    ║  ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗              ║
-    ║  ██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝              ║
-    ║  ██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗              ║
-    ║  ╚██████╗   ██║   ██████╔╝███████╗██║  ██║              ║
-    ║   ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝              ║
+    ║    ██████╗ ██████╗ ██████╗      ██████╗ ███╗   ██╗███████╗
+    ║   ██╔═══██╗██╔══██╗██╔══██╗    ██╔═══██╗████╗  ██║██╔════╝
+    ║   ██║   ██║██║  ██║██║  ██║    ██║   ██║██╔██╗ ██║█████╗  
+    ║   ██║   ██║██║  ██║██║  ██║    ██║   ██║██║╚██╗██║██╔══╝  
+    ║   ╚██████╔╝██████╔╝██████╔╝    ╚██████╔╝██║ ╚████║███████╗
+    ║    ╚═════╝ ╚═════╝ ╚═════╝      ╚═════╝ ╚═╝  ╚═══╝╚══════╝
     ║                                                           ║
-    ║        ██████╗  █████╗ ████████╗██████╗ ██╗ ██████╗ ████████╗
-    ║        ██╔══██╗██╔══██╗╚══██╔══╝██╔══██╗██║██╔═══██╗╚══██╔══╝
-    ║        ██████╔╝███████║   ██║   ██████╔╝██║██║   ██║   ██║   
-    ║        ██╔═══╝ ██╔══██║   ██║   ██╔══██╗██║██║   ██║   ██║   
-    ║        ██║     ██║  ██║   ██║   ██║  ██║██║╚██████╔╝   ██║   
-    ║        ╚═╝     ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝ ╚═════╝    ╚═╝   
+    ║            ██████╗ ██╗   ██╗████████╗                    ║
+    ║           ██╔═══██╗██║   ██║╚══██╔══╝                    ║
+    ║           ██║   ██║██║   ██║   ██║                       ║
+    ║           ██║   ██║██║   ██║   ██║                       ║
+    ║           ╚██████╔╝╚██████╔╝   ██║                       ║
+    ║            ╚═════╝  ╚═════╝    ╚═╝                       ║
     ║                                                           ║
     ║           Security Hardening & Audit Tool                ║
+    ║              CyberPatriot Competition                    ║
     ║                   Ubuntu 24 / Mint 21                    ║
     ║                                                           ║
     ╚═══════════════════════════════════════════════════════════╝
@@ -131,10 +132,10 @@ user_auditing() {
     
     # Get secure admin password
     echo -e "\n${CYAN}Enter the secure password for admin accounts:${NC}"
-    read -rs SECURE_ADMIN_PASSWORD
+    read -r SECURE_ADMIN_PASSWORD
     echo
     echo -e "${CYAN}Confirm secure password:${NC}"
-    read -rs SECURE_ADMIN_PASSWORD_CONFIRM
+    read -r SECURE_ADMIN_PASSWORD_CONFIRM
     echo
     
     if [[ "$SECURE_ADMIN_PASSWORD" != "$SECURE_ADMIN_PASSWORD_CONFIRM" ]]; then
@@ -147,7 +148,7 @@ user_auditing() {
     
     # Get list of authorized admins
     echo -e "\n${CYAN}Enter authorized admin users and their passwords${NC}"
-    echo -e "${YELLOW}Format: username (press Enter, then enter password)${NC}"
+    echo -e "${YELLOW}Format: username (press Enter)${NC}"
     echo -e "${YELLOW}Enter 'done' when finished${NC}\n"
     
     declare -A AUTHORIZED_ADMINS
@@ -158,7 +159,7 @@ user_auditing() {
         [[ -z "$admin_user" ]] && continue
         
         echo -e -n "${CYAN}Password for $admin_user: ${NC}"
-        read -rs admin_pass
+        read -r admin_pass
         echo
         
         AUTHORIZED_ADMINS["$admin_user"]="$admin_pass"
