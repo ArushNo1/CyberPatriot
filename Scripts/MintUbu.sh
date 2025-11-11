@@ -285,7 +285,7 @@ user_auditing() {
         if confirm_action "Do you want to remove these unauthorized users?"; then
             for unauth_user in "${UNAUTHORIZED_USERS[@]}"; do
                 if confirm_action "Remove user $unauth_user?"; then
-                    userdel -r "$unauth_user" 2>/dev/null
+                    userdel "$unauth_user" 2>/dev/null
                     if [[ $? -eq 0 ]]; then
                         print_success "Removed user: $unauth_user"
                     else
@@ -794,7 +794,387 @@ configure_firewall() {
 }
 
 #############################################
-# Task 4: Service Audit
+# Task 4: Password Policy Configuration
+#############################################
+
+configure_password_policy() {
+    print_header "PASSWORD POLICY CONFIGURATION (SYSTEM-WIDE)"
+    print_info "Configuring system-wide password policies for ALL users"
+    print_warning "These settings apply to existing AND future users"
+    
+    local changes_made=false
+    
+    # Get MAIN_USER if not set from user auditing
+    if [[ -z "$MAIN_USER" ]]; then
+        echo -e "${CYAN}Enter the main username to protect from lockout:${NC}"
+        read -r MAIN_USER
+        
+        if ! id "$MAIN_USER" &>/dev/null; then
+            print_error "User $MAIN_USER does not exist!"
+            press_enter
+            return 1
+        fi
+    fi
+    
+    print_success "Protected user: $MAIN_USER (exempt from aging/lockout)"
+    echo ""
+    
+    # 1. Configure system-wide password aging in /etc/login.defs
+    echo -e "${BOLD}Configuring system-wide password aging policies...${NC}"
+    print_info "Affects ALL users except protected MAIN_USER"
+    
+    local login_defs="/etc/login.defs"
+    
+    if [[ -f "$login_defs" ]]; then
+        if confirm_action "Configure password aging (Max 90d, Min 7d, Warn 14d)?"; then
+            cp "$login_defs" "${login_defs}.bak.$(date +%Y%m%d_%H%M%S)"
+            print_success "Created backup of login.defs"
+            
+            # Update or add PASS_MAX_DAYS
+            if grep -q "^PASS_MAX_DAYS" "$login_defs"; then
+                sed -i "s/^PASS_MAX_DAYS.*/PASS_MAX_DAYS\t90/" "$login_defs"
+            elif grep -q "^#PASS_MAX_DAYS" "$login_defs"; then
+                sed -i "s/^#PASS_MAX_DAYS.*/PASS_MAX_DAYS\t90/" "$login_defs"
+            else
+                echo -e "PASS_MAX_DAYS\t90" >> "$login_defs"
+            fi
+            
+            # Update or add PASS_MIN_DAYS
+            if grep -q "^PASS_MIN_DAYS" "$login_defs"; then
+                sed -i "s/^PASS_MIN_DAYS.*/PASS_MIN_DAYS\t7/" "$login_defs"
+            elif grep -q "^#PASS_MIN_DAYS" "$login_defs"; then
+                sed -i "s/^#PASS_MIN_DAYS.*/PASS_MIN_DAYS\t7/" "$login_defs"
+            else
+                echo -e "PASS_MIN_DAYS\t7" >> "$login_defs"
+            fi
+            
+            # Update or add PASS_WARN_AGE
+            if grep -q "^PASS_WARN_AGE" "$login_defs"; then
+                sed -i "s/^PASS_WARN_AGE.*/PASS_WARN_AGE\t14/" "$login_defs"
+            elif grep -q "^#PASS_WARN_AGE" "$login_defs"; then
+                sed -i "s/^#PASS_WARN_AGE.*/PASS_WARN_AGE\t14/" "$login_defs"
+            else
+                echo -e "PASS_WARN_AGE\t14" >> "$login_defs"
+            fi
+            
+            print_success "System-wide password aging configured"
+            print_info "  - Maximum password age: 90 days"
+            print_info "  - Minimum password age: 7 days"
+            print_info "  - Warning period: 14 days"
+            changes_made=true
+            
+            # Apply to existing users too (except MAIN_USER)
+            echo -e "\n${BOLD}Applying to existing users...${NC}"
+            local aged_count=0
+            local skipped_count=0
+            
+            while IFS=: read -r username _ uid _ _ home shell; do
+                if [[ $uid -ge 1000 && $uid -lt 65534 ]]; then
+                    if [[ "$shell" != "/usr/sbin/nologin" && "$shell" != "/bin/false" ]]; then
+                        # CRITICAL: Skip MAIN_USER to prevent lockout
+                        if [[ "$username" == "$MAIN_USER" ]]; then
+                            print_info "Skipped protected user: $MAIN_USER"
+                            ((skipped_count++))
+                        else
+                            chage -M 90 -m 7 -W 14 "$username" 2>/dev/null
+                            if [[ $? -eq 0 ]]; then
+                                ((aged_count++))
+                            fi
+                        fi
+                    fi
+                fi
+            done < /etc/passwd
+            
+            print_success "Applied to $aged_count users, skipped $skipped_count protected user(s)"
+        fi
+        
+        # Configure login security policies
+        if confirm_action "Configure login security (timeouts, retries, logging)?"; then
+            # LOGIN_TIMEOUT
+            if grep -q "^LOGIN_TIMEOUT" "$login_defs"; then
+                sed -i "s/^LOGIN_TIMEOUT.*/LOGIN_TIMEOUT\t60/" "$login_defs"
+            else
+                echo -e "LOGIN_TIMEOUT\t60" >> "$login_defs"
+            fi
+            
+            # LOGIN_RETRIES
+            if grep -q "^LOGIN_RETRIES" "$login_defs"; then
+                sed -i "s/^LOGIN_RETRIES.*/LOGIN_RETRIES\t5/" "$login_defs"
+            else
+                echo -e "LOGIN_RETRIES\t5" >> "$login_defs"
+            fi
+            
+            # Enable logging
+            if grep -q "^FAILLOG_ENAB" "$login_defs"; then
+                sed -i "s/^FAILLOG_ENAB.*/FAILLOG_ENAB\t\tyes/" "$login_defs"
+            else
+                echo -e "FAILLOG_ENAB\t\tyes" >> "$login_defs"
+            fi
+            
+            if grep -q "^LOG_UNKFAIL_ENAB" "$login_defs"; then
+                sed -i "s/^LOG_UNKFAIL_ENAB.*/LOG_UNKFAIL_ENAB\tyes/" "$login_defs"
+            else
+                echo -e "LOG_UNKFAIL_ENAB\tyes" >> "$login_defs"
+            fi
+            
+            if grep -q "^SYSLOG_SU_ENAB" "$login_defs"; then
+                sed -i "s/^SYSLOG_SU_ENAB.*/SYSLOG_SU_ENAB\t\tyes/" "$login_defs"
+            else
+                echo -e "SYSLOG_SU_ENAB\t\tyes" >> "$login_defs"
+            fi
+            
+            if grep -q "^SYSLOG_SG_ENAB" "$login_defs"; then
+                sed -i "s/^SYSLOG_SG_ENAB.*/SYSLOG_SG_ENAB\t\tyes/" "$login_defs"
+            else
+                echo -e "SYSLOG_SG_ENAB\t\tyes" >> "$login_defs"
+            fi
+            
+            print_success "Login security policies configured"
+            print_info "  - Login timeout: 60 seconds"
+            print_info "  - Login retries: 5 attempts"
+            print_info "  - Failed login logging: Enabled"
+            print_info "  - Su/sg logging: Enabled"
+            changes_made=true
+        fi
+    else
+        print_error "/etc/login.defs not found"
+    fi
+    
+    # 2. Install and configure libpam-pwquality for password complexity
+    echo -e "\n${BOLD}Configuring system-wide password complexity...${NC}"
+    
+    if ! dpkg -l | grep -q "libpam-pwquality"; then
+        print_warning "libpam-pwquality not installed"
+        if confirm_action "Install libpam-pwquality for password complexity enforcement?"; then
+            apt-get update -qq
+            apt-get install -y libpam-pwquality
+            if [[ $? -eq 0 ]]; then
+                print_success "libpam-pwquality installed"
+                changes_made=true
+            else
+                print_error "Failed to install libpam-pwquality"
+                print_warning "Skipping password complexity configuration"
+                echo ""
+                return
+            fi
+        fi
+    else
+        print_success "libpam-pwquality already installed"
+    fi
+    
+    # Configure /etc/security/pwquality.conf
+    local pwquality_conf="/etc/security/pwquality.conf"
+    
+    if [[ -f "$pwquality_conf" ]]; then
+        if confirm_action "Configure password complexity (Min 8 chars, 1 digit, 1 upper, 1 lower, 1 special)?"; then
+            cp "$pwquality_conf" "${pwquality_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+            print_success "Created backup of pwquality.conf"
+            
+            # Remove old settings and add new ones at the end
+            {
+                echo ""
+                echo "# CyberPatriot Password Complexity - $(date +%Y-%m-%d)"
+                echo "minlen = 8"
+                echo "dcredit = -1"
+                echo "ucredit = -1"
+                echo "lcredit = -1"
+                echo "ocredit = -1"
+            } >> "$pwquality_conf"
+            
+            print_success "Password complexity configured system-wide"
+            print_info "  - Minimum length: 8 characters"
+            print_info "  - At least 1 digit required"
+            print_info "  - At least 1 uppercase letter required"
+            print_info "  - At least 1 lowercase letter required"
+            print_info "  - At least 1 special character required"
+            changes_made=true
+        fi
+    else
+        print_error "$pwquality_conf not found"
+    fi
+    
+    # 3. Configure PAM to use pwquality and password history
+    echo -e "\n${BOLD}Configuring PAM password policies...${NC}"
+    print_info "System-wide enforcement through PAM"
+    
+    local common_password="/etc/pam.d/common-password"
+    
+    if [[ -f "$common_password" ]]; then
+        cp "$common_password" "${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
+        print_success "Created backup of common-password"
+        
+        # Enable pam_pwquality if not already enabled
+        if ! grep -q "pam_pwquality.so" "$common_password"; then
+            if confirm_action "Enable PAM password quality checking?"; then
+                # Add BEFORE pam_unix.so lines
+                sed -i '/pam_unix.so/i password\trequisite\t\t\tpam_pwquality.so retry=3' "$common_password"
+                print_success "Enabled PAM password quality module"
+                changes_made=true
+            fi
+        else
+            print_info "PAM password quality already enabled"
+        fi
+        
+        # Enable password history
+        if ! grep "pam_unix.so" "$common_password" | grep -q "remember="; then
+            if confirm_action "Enable password history (remember last 5 passwords)?"; then
+                # Add remember=5 to pam_unix.so line
+                sed -i '/pam_unix.so.*password/ s/$/ remember=5/' "$common_password"
+                print_success "Password history enabled (system-wide)"
+                print_info "  - Users cannot reuse last 5 passwords"
+                changes_made=true
+            fi
+        else
+            print_info "Password history already configured"
+        fi
+    else
+        print_error "$common_password not found"
+    fi
+    
+    # 4. Configure account lockout policy (system-wide)
+    echo -e "\n${BOLD}Configuring system-wide account lockout...${NC}"
+    print_info "Locks accounts after repeated failed login attempts"
+    print_warning "NOTE: Faillock affects all users - MAIN_USER cannot be exempted from PAM"
+    print_info "Make sure you know the password for: $MAIN_USER"
+    
+    # Check which lockout mechanism is available
+    if command -v faillock &>/dev/null || [[ -f "/usr/sbin/faillock" ]]; then
+        print_info "System uses 'faillock' for account lockout"
+        
+        if confirm_action "Configure account lockout (5 failed attempts, 15 min lockout)?"; then
+            local faillock_conf="/etc/security/faillock.conf"
+            
+            if [[ ! -f "$faillock_conf" ]]; then
+                # Create new faillock.conf
+                cat > "$faillock_conf" << 'EOF'
+# CyberPatriot Account Lockout Configuration
+# Lock account after 5 failed attempts for 15 minutes (900 seconds)
+# WARNING: This affects ALL users including admins
+deny = 5
+unlock_time = 900
+EOF
+                print_success "Created faillock.conf with lockout policy"
+                changes_made=true
+            else
+                # Update existing file
+                cp "$faillock_conf" "${faillock_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+                
+                # Ensure deny and unlock_time are set
+                if grep -q "^deny" "$faillock_conf"; then
+                    sed -i "s/^deny.*/deny = 5/" "$faillock_conf"
+                else
+                    echo "deny = 5" >> "$faillock_conf"
+                fi
+                
+                if grep -q "^unlock_time" "$faillock_conf"; then
+                    sed -i "s/^unlock_time.*/unlock_time = 900/" "$faillock_conf"
+                else
+                    echo "unlock_time = 900" >> "$faillock_conf"
+                fi
+                
+                print_success "Updated faillock configuration"
+                changes_made=true
+            fi
+            
+            print_info "  - Lock after: 5 failed attempts"
+            print_info "  - Lockout duration: 15 minutes (auto-unlock)"
+            print_info "  - Applies to: ALL users (cannot exempt specific users)"
+            print_warning "  - Admin can unlock with: faillock --user <username> --reset"
+        fi
+    else
+        print_warning "Faillock not found - account lockout not configured"
+        print_info "Consider installing faillock or configuring pam_tally2 manually"
+    fi
+    
+    # 5. Summary and verification
+    echo -e "\n${BOLD}System-Wide Password Policy Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Check /etc/login.defs settings
+    if [[ -f "/etc/login.defs" ]]; then
+        local max_days=$(grep "^PASS_MAX_DAYS" /etc/login.defs 2>/dev/null | awk '{print $2}')
+        local min_days=$(grep "^PASS_MIN_DAYS" /etc/login.defs 2>/dev/null | awk '{print $2}')
+        local warn_age=$(grep "^PASS_WARN_AGE" /etc/login.defs 2>/dev/null | awk '{print $2}')
+        
+        if [[ "$max_days" == "90" ]]; then
+            echo -e "${GREEN}✓${NC} Password max age: 90 days"
+        else
+            echo -e "${YELLOW}!${NC} Password max age: ${max_days:-Not set}"
+        fi
+        
+        if [[ "$min_days" == "7" ]]; then
+            echo -e "${GREEN}✓${NC} Password min age: 7 days"
+        else
+            echo -e "${YELLOW}!${NC} Password min age: ${min_days:-Not set}"
+        fi
+        
+        if [[ "$warn_age" == "14" ]]; then
+            echo -e "${GREEN}✓${NC} Password warning: 14 days"
+        else
+            echo -e "${YELLOW}!${NC} Password warning: ${warn_age:-Not set}"
+        fi
+    fi
+    
+    # Check password quality
+    if dpkg -l 2>/dev/null | grep -q "libpam-pwquality"; then
+        echo -e "${GREEN}✓${NC} Password quality module: INSTALLED"
+    else
+        echo -e "${YELLOW}!${NC} Password quality module: NOT INSTALLED"
+    fi
+    
+    if [[ -f "/etc/security/pwquality.conf" ]] && grep -q "^minlen" /etc/security/pwquality.conf 2>/dev/null; then
+        local minlen=$(grep "^minlen" /etc/security/pwquality.conf | tail -1 | awk '{print $3}')
+        echo -e "${GREEN}✓${NC} Password complexity: CONFIGURED (min length: $minlen)"
+    else
+        echo -e "${YELLOW}!${NC} Password complexity: NOT CONFIGURED"
+    fi
+    
+    # Check PAM
+    if [[ -f "/etc/pam.d/common-password" ]]; then
+        if grep -q "pam_pwquality.so" /etc/pam.d/common-password 2>/dev/null; then
+            echo -e "${GREEN}✓${NC} PAM password quality: ENABLED"
+        else
+            echo -e "${YELLOW}!${NC} PAM password quality: NOT ENABLED"
+        fi
+        
+        if grep "pam_unix.so" /etc/pam.d/common-password 2>/dev/null | grep -q "remember="; then
+            echo -e "${GREEN}✓${NC} Password history: ENABLED (system-wide)"
+        else
+            echo -e "${YELLOW}!${NC} Password history: NOT ENABLED"
+        fi
+    fi
+    
+    # Check account lockout
+    if [[ -f "/etc/security/faillock.conf" ]]; then
+        if grep -q "^deny" /etc/security/faillock.conf 2>/dev/null; then
+            local deny=$(grep "^deny" /etc/security/faillock.conf | awk '{print $3}')
+            echo -e "${GREEN}✓${NC} Account lockout: ENABLED (${deny} attempts)"
+        else
+            echo -e "${YELLOW}!${NC} Account lockout: CONFIGURED but deny not set"
+        fi
+    else
+        echo -e "${YELLOW}!${NC} Account lockout: NOT CONFIGURED"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    print_warning "IMPORTANT: Policies are SYSTEM-WIDE and affect most users"
+    print_success "Protected user: $MAIN_USER (exempt from password aging)"
+    print_info "Settings apply to existing users AND future new users"
+    print_info "Existing passwords remain valid until changed"
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "Password policies configured successfully"
+    else
+        print_info "No changes were made"
+    fi
+    
+    print_header "PASSWORD POLICY CONFIGURATION COMPLETE"
+    press_enter
+}
+
+#############################################
+# Task 5: Service Audit
 #############################################
 
 audit_services() {
@@ -805,7 +1185,7 @@ audit_services() {
 }
 
 #############################################
-# Task 5: File Permissions Audit
+# Task 6: File Permissions Audit
 #############################################
 
 audit_file_permissions() {
@@ -816,7 +1196,7 @@ audit_file_permissions() {
 }
 
 #############################################
-# Task 6: Update System
+# Task 7: Update System
 #############################################
 
 update_system() {
@@ -827,7 +1207,7 @@ update_system() {
 }
 
 #############################################
-# Task 7: Remove Prohibited Software
+# Task 8: Remove Prohibited Software
 #############################################
 
 remove_prohibited_software() {
@@ -838,7 +1218,7 @@ remove_prohibited_software() {
 }
 
 #############################################
-# Task 8: SSH Hardening
+# Task 9: SSH Hardening
 #############################################
 
 harden_ssh() {
@@ -849,7 +1229,7 @@ harden_ssh() {
 }
 
 #############################################
-# Task 9: Enable Security Features
+# Task 10: Enable Security Features
 #############################################
 
 enable_security_features() {
@@ -860,7 +1240,331 @@ enable_security_features() {
 }
 
 #############################################
-# Task 10: Generate Security Report
+# Task 11: Generate Security Report
+#############################################
+
+generate_report() {
+    print_header "SECURITY REPORT"
+    print_info "This module will generate a comprehensive security report"
+    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    press_enter
+}
+
+#############################################
+# Main Menu
+#############################################
+
+show_menu() {
+    clear
+    echo -e "${BOLD}Configuring login policies (/etc/login.defs)...${NC}"
+    
+    local login_defs="/etc/login.defs"
+    local login_defs_backup="${login_defs}.bak.$(date +%Y%m%d_%H%M%S)"
+    
+    if [[ -f "$login_defs" ]]; then
+        cp "$login_defs" "$login_defs_backup"
+        print_success "Created backup: $login_defs_backup"
+        
+        # Function to set or update a parameter in login.defs
+        set_login_def() {
+            local param=$1
+            local value=$2
+            
+            if grep -q "^${param}" "$login_defs"; then
+                sed -i "s/^${param}.*/${param} ${value}/" "$login_defs"
+            elif grep -q "^#${param}" "$login_defs"; then
+                sed -i "s/^#${param}.*/${param} ${value}/" "$login_defs"
+            else
+                echo "${param} ${value}" >> "$login_defs"
+            fi
+        }
+        
+        if confirm_action "Configure password aging policies?"; then
+            set_login_def "PASS_MAX_DAYS" "90"
+            set_login_def "PASS_MIN_DAYS" "7"
+            set_login_def "PASS_WARN_AGE" "14"
+            print_success "Password aging: Max 90 days, Min 7 days, Warn 14 days"
+            changes_made=true
+        fi
+        
+        if confirm_action "Configure login security policies?"; then
+            set_login_def "FAILLOG_ENAB" "yes"
+            set_login_def "LOG_UNKFAIL_ENAB" "yes"
+            set_login_def "SYSLOG_SU_ENAB" "yes"
+            set_login_def "SYSLOG_SG_ENAB" "yes"
+            set_login_def "LOGIN_TIMEOUT" "60"
+            set_login_def "LOGIN_RETRIES" "5"
+            print_success "Login policies: Logging enabled, 60s timeout, 5 retries"
+            changes_made=true
+        fi
+        
+        # Verify changes
+        if confirm_action "View updated login.defs settings?"; then
+            echo -e "\n${CYAN}Password Aging Settings:${NC}"
+            grep "^PASS_MAX_DAYS\|^PASS_MIN_DAYS\|^PASS_WARN_AGE" "$login_defs"
+            echo -e "\n${CYAN}Login Security Settings:${NC}"
+            grep "^FAILLOG_ENAB\|^LOG_UNKFAIL_ENAB\|^SYSLOG_SU_ENAB\|^SYSLOG_SG_ENAB\|^LOGIN_TIMEOUT\|^LOGIN_RETRIES" "$login_defs"
+            echo ""
+        fi
+    else
+        print_error "File $login_defs not found"
+    fi
+    
+    # 2. Configure /etc/security/pwquality.conf (SAFE - doesn't affect existing passwords)
+    echo -e "\n${BOLD}Configuring password quality requirements...${NC}"
+    print_info "Note: These settings only affect NEW passwords, not existing ones"
+    
+    local pwquality_conf="/etc/security/pwquality.conf"
+    
+    # Check if libpam-pwquality is installed
+    if ! dpkg -l | grep -q "libpam-pwquality"; then
+        print_warning "libpam-pwquality is not installed"
+        if confirm_action "Install libpam-pwquality? (Required for password quality enforcement)"; then
+            apt install -y libpam-pwquality
+            if [[ $? -eq 0 ]]; then
+                print_success "libpam-pwquality installed successfully"
+            else
+                print_error "Failed to install libpam-pwquality"
+            fi
+        fi
+    else
+        print_success "libpam-pwquality is already installed"
+    fi
+    
+    if [[ -f "$pwquality_conf" ]]; then
+        local pwquality_backup="${pwquality_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+        cp "$pwquality_conf" "$pwquality_backup"
+        print_success "Created backup: $pwquality_backup"
+        
+        if confirm_action "Configure password complexity requirements?"; then
+            # Function to set pwquality parameter
+            set_pwquality() {
+                local param=$1
+                local value=$2
+                
+                if grep -q "^${param}" "$pwquality_conf"; then
+                    sed -i "s/^${param}.*/${param} = ${value}/" "$pwquality_conf"
+                elif grep -q "^# ${param}" "$pwquality_conf"; then
+                    sed -i "s/^# ${param}.*/${param} = ${value}/" "$pwquality_conf"
+                else
+                    echo "${param} = ${value}" >> "$pwquality_conf"
+                fi
+            }
+            
+            set_pwquality "minlen" "8"
+            set_pwquality "dcredit" "-1"  # At least 1 digit
+            set_pwquality "ucredit" "-1"  # At least 1 uppercase
+            set_pwquality "lcredit" "-1"  # At least 1 lowercase
+            set_pwquality "ocredit" "-1"  # At least 1 special char
+            
+            print_success "Password complexity: Min 8 chars, 1 digit, 1 upper, 1 lower, 1 special"
+            changes_made=true
+            
+            if confirm_action "View pwquality.conf settings?"; then
+                echo -e "\n${CYAN}Password Quality Settings:${NC}"
+                grep "^minlen\|^dcredit\|^ucredit\|^lcredit\|^ocredit" "$pwquality_conf"
+                echo ""
+            fi
+        fi
+    else
+        print_warning "File $pwquality_conf not found"
+    fi
+    
+    # 3. Configure PAM (CAREFUL - avoided dangerous settings)
+    echo -e "\n${BOLD}Configuring PAM password policies...${NC}"
+    print_warning "AVOIDING libpam-cracklib - it can cause authentication issues"
+    print_info "Using safe pam_pwquality configuration instead"
+    
+    local common_password="/etc/pam.d/common-password"
+    
+    if [[ -f "$common_password" ]]; then
+        local pam_backup="${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
+        cp "$common_password" "$pam_backup"
+        print_success "Created backup: $pam_backup"
+        
+        if confirm_action "Configure PAM to enforce password quality and history?"; then
+            # Check if pam_pwquality line exists
+            if ! grep -q "pam_pwquality.so" "$common_password"; then
+                # Add pam_pwquality before pam_unix
+                sed -i '/pam_unix.so/i password requisite pam_pwquality.so retry=3' "$common_password"
+                print_success "Added pam_pwquality.so with retry=3"
+                changes_made=true
+            else
+                print_info "pam_pwquality.so already configured"
+            fi
+            
+            # Add password history (remember last 5 passwords) - SAFE
+            if grep -q "pam_unix.so.*password" "$common_password"; then
+                if ! grep "pam_unix.so.*password" "$common_password" | grep -q "remember="; then
+                    sed -i '/pam_unix.so.*password/ s/$/ remember=5/' "$common_password"
+                    print_success "Added password history (remember 5 passwords)"
+                    changes_made=true
+                else
+                    print_info "Password history already configured"
+                fi
+            fi
+            
+            print_success "PAM configuration updated safely"
+        fi
+    else
+        print_error "File $common_password not found"
+    fi
+    
+    # 4. Run password consistency check
+    echo -e "\n${BOLD}Running password file consistency check...${NC}"
+    if confirm_action "Run pwck to verify password file integrity?"; then
+        pwck -r
+        print_success "Password file check completed"
+    fi
+    
+    # 5. Apply password aging to existing users (except protected user)
+    echo -e "\n${BOLD}Applying password aging to existing users...${NC}"
+    if confirm_action "Apply password aging policies to existing users?"; then
+        local aged_count=0
+        
+        while IFS=: read -r username _ uid _ _ home shell; do
+            # Only apply to human users (UID >= 1000) with valid shells
+            if [[ $uid -ge 1000 && $uid -lt 65534 ]]; then
+                if [[ "$shell" != "/usr/sbin/nologin" && "$shell" != "/bin/false" ]]; then
+                    # Skip the protected main user
+                    if [[ "$username" != "$MAIN_USER" && "$username" != "root" ]]; then
+                        chage -M 90 -m 7 -W 14 "$username" 2>/dev/null
+                        if [[ $? -eq 0 ]]; then
+                            print_success "Applied aging policy to: $username"
+                            ((aged_count++))
+                        fi
+                    else
+                        print_info "Skipped protected user: $username"
+                    fi
+                fi
+            fi
+        done < /etc/passwd
+        
+        print_success "Applied password aging to $aged_count users"
+        changes_made=true
+    fi
+    
+    # 6. Summary
+    echo -e "\n${BOLD}Password Policy Configuration Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Check password aging settings
+    if grep -q "^PASS_MAX_DAYS.*90" "$login_defs" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Password max age: 90 days"
+    else
+        echo -e "${YELLOW}!${NC} Password max age: Not configured"
+    fi
+    
+    if grep -q "^PASS_MIN_DAYS.*7" "$login_defs" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Password min age: 7 days"
+    else
+        echo -e "${YELLOW}!${NC} Password min age: Not configured"
+    fi
+    
+    # Check password quality
+    if [[ -f "$pwquality_conf" ]] && grep -q "^minlen.*8" "$pwquality_conf" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Minimum password length: 8 characters"
+    else
+        echo -e "${YELLOW}!${NC} Password length requirement: Not configured"
+    fi
+    
+    # Check PAM
+    if grep -q "pam_pwquality.so" "$common_password" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} PAM password quality: Enabled"
+    else
+        echo -e "${YELLOW}!${NC} PAM password quality: Not enabled"
+    fi
+    
+    if grep "pam_unix.so.*password" "$common_password" 2>/dev/null | grep -q "remember="; then
+        echo -e "${GREEN}✓${NC} Password history: Enabled"
+    else
+        echo -e "${YELLOW}!${NC} Password history: Not enabled"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    print_warning "IMPORTANT: These policies only affect NEW passwords"
+    print_info "Existing passwords remain valid until changed"
+    print_info "Protected user: $MAIN_USER (exempt from restrictions)"
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "Password policies configured successfully"
+    else
+        print_info "No changes were made"
+    fi
+    
+    print_header "PASSWORD POLICY CONFIGURATION COMPLETE"
+    press_enter
+}
+
+#############################################
+# Task 5: Service Audit
+#############################################
+
+audit_services() {
+    print_header "SERVICE AUDIT"
+    print_info "This module will audit running services"
+    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    press_enter
+}
+
+#############################################
+# Task 6: File Permissions Audit
+#############################################
+
+audit_file_permissions() {
+    print_header "FILE PERMISSIONS AUDIT"
+    print_info "This module will check critical file permissions"
+    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    press_enter
+}
+
+#############################################
+# Task 7: Update System
+#############################################
+
+update_system() {
+    print_header "SYSTEM UPDATE"
+    print_info "This module will update the system"
+    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    press_enter
+}
+
+#############################################
+# Task 8: Remove Prohibited Software
+#############################################
+
+remove_prohibited_software() {
+    print_header "REMOVE PROHIBITED SOFTWARE"
+    print_info "This module will scan for and remove prohibited software"
+    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    press_enter
+}
+
+#############################################
+# Task 9: SSH Hardening
+#############################################
+
+harden_ssh() {
+    print_header "SSH HARDENING"
+    print_info "This module will harden SSH configuration"
+    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    press_enter
+}
+
+#############################################
+# Task 10: Enable Security Features
+#############################################
+
+enable_security_features() {
+    print_header "ENABLE SECURITY FEATURES"
+    print_info "This module will enable various security features"
+    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    press_enter
+}
+
+#############################################
+# Task 11: Generate Security Report
 #############################################
 
 generate_report() {
@@ -884,13 +1588,14 @@ show_menu() {
     echo -e "${GREEN} 1)${NC} User Auditing"
     echo -e "${GREEN} 2)${NC} Disable Root Login"
     echo -e "${GREEN} 3)${NC} Configure Firewall (UFW)"
-    echo -e "${GREEN} 4)${NC} Audit Services"
-    echo -e "${GREEN} 5)${NC} Audit File Permissions"
-    echo -e "${GREEN} 6)${NC} Update System"
-    echo -e "${GREEN} 7)${NC} Remove Prohibited Software"
-    echo -e "${GREEN} 8)${NC} Harden SSH Configuration"
-    echo -e "${GREEN} 9)${NC} Enable Security Features"
-    echo -e "${GREEN}10)${NC} Generate Security Report"
+    echo -e "${GREEN} 4)${NC} Configure Password Policies"
+    echo -e "${GREEN} 5)${NC} Audit Services"
+    echo -e "${GREEN} 6)${NC} Audit File Permissions"
+    echo -e "${GREEN} 7)${NC} Update System"
+    echo -e "${GREEN} 8)${NC} Remove Prohibited Software"
+    echo -e "${GREEN} 9)${NC} Harden SSH Configuration"
+    echo -e "${GREEN}10)${NC} Enable Security Features"
+    echo -e "${GREEN}11)${NC} Generate Security Report"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -913,13 +1618,14 @@ main() {
             1) user_auditing ;;
             2) disable_root_login ;;
             3) configure_firewall ;;
-            4) audit_services ;;
-            5) audit_file_permissions ;;
-            6) update_system ;;
-            7) remove_prohibited_software ;;
-            8) harden_ssh ;;
-            9) enable_security_features ;;
-            10) generate_report ;;
+            4) configure_password_policy ;;
+            5) audit_services ;;
+            6) audit_file_permissions ;;
+            7) update_system ;;
+            8) remove_prohibited_software ;;
+            9) harden_ssh ;;
+            10) enable_security_features ;;
+            11) generate_report ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
