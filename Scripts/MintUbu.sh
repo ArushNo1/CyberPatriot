@@ -1041,9 +1041,14 @@ configure_password_policy() {
     if command -v faillock &>/dev/null || [[ -f "/usr/sbin/faillock" ]]; then
         print_info "System uses 'faillock' for account lockout"
         
-        if confirm_action "Configure account lockout (5 failed attempts, 15 min lockout)?"; then
+        if confirm_action "Configure comprehensive account lockout with PAM?"; then
             local faillock_conf="/etc/security/faillock.conf"
+            local common_auth="/etc/pam.d/common-auth"
+            local gdm_password="/etc/pam.d/gdm-password"
+            local sshd_pam="/etc/pam.d/sshd"
             
+            # Step 1: Configure /etc/security/faillock.conf
+            echo -e "${BOLD}Step 1: Configuring faillock.conf...${NC}"
             if [[ ! -f "$faillock_conf" ]]; then
                 # Create new faillock.conf
                 cat > "$faillock_conf" << 'EOF'
@@ -1052,6 +1057,8 @@ configure_password_policy() {
 # WARNING: This affects ALL users including admins
 deny = 5
 unlock_time = 900
+audit
+silent
 EOF
                 print_success "Created faillock.conf with lockout policy"
                 changes_made=true
@@ -1072,14 +1079,164 @@ EOF
                     echo "unlock_time = 900" >> "$faillock_conf"
                 fi
                 
+                # Add audit if not present
+                if ! grep -q "^audit" "$faillock_conf"; then
+                    echo "audit" >> "$faillock_conf"
+                fi
+                
+                # Add silent if not present
+                if ! grep -q "^silent" "$faillock_conf"; then
+                    echo "silent" >> "$faillock_conf"
+                fi
+                
                 print_success "Updated faillock configuration"
                 changes_made=true
             fi
             
+            # Step 2: Configure PAM common-auth (CAREFUL - this is critical)
+            echo -e "\n${BOLD}Step 2: Configuring PAM common-auth...${NC}"
+            print_warning "CRITICAL: Modifying PAM auth can lock you out if done incorrectly!"
+            print_info "A backup will be created before any changes"
+            
+            if [[ -f "$common_auth" ]]; then
+                if confirm_action "Add faillock to PAM common-auth (SAFE method)?"; then
+                    cp "$common_auth" "${common_auth}.bak.$(date +%Y%m%d_%H%M%S)"
+                    print_success "Created backup of common-auth"
+                    
+                    # Check if faillock is already configured
+                    if ! grep -q "pam_faillock.so preauth" "$common_auth"; then
+                        # Add preauth line BEFORE pam_unix.so
+                        sed -i '/pam_unix.so/i auth required pam_faillock.so preauth' "$common_auth"
+                        print_success "Added faillock preauth to common-auth"
+                        changes_made=true
+                    else
+                        print_info "Faillock preauth already configured"
+                    fi
+                    
+                    if ! grep -q "pam_faillock.so authfail" "$common_auth"; then
+                        # Add authfail line AFTER pam_unix.so
+                        sed -i '/pam_unix.so/a auth [default=die] pam_faillock.so authfail' "$common_auth"
+                        print_success "Added faillock authfail to common-auth"
+                        changes_made=true
+                    else
+                        print_info "Faillock authfail already configured"
+                    fi
+                    
+                    print_success "PAM common-auth configured for faillock"
+                fi
+            else
+                print_error "$common_auth not found"
+            fi
+            
+            # Step 3: Configure GDM password (prevents root GUI login)
+            echo -e "\n${BOLD}Step 3: Configuring GDM to prevent root login...${NC}"
+            print_info "This prevents root from logging in via GUI"
+            
+            if [[ -f "$gdm_password" ]]; then
+                if confirm_action "Prevent root from using GUI login (GDM)?"; then
+                    cp "$gdm_password" "${gdm_password}.bak.$(date +%Y%m%d_%H%M%S)"
+                    print_success "Created backup of gdm-password"
+                    
+                    # Check if the line already exists
+                    if ! grep -q "pam_succeed_if.so user != root" "$gdm_password"; then
+                        # Add the line at the beginning of auth section
+                        sed -i '/@include common-auth/i auth required pam_succeed_if.so user != root' "$gdm_password"
+                        print_success "Added root restriction to GDM"
+                        changes_made=true
+                    else
+                        print_info "GDM root restriction already configured"
+                    fi
+                fi
+            else
+                print_warning "$gdm_password not found (GDM may not be installed)"
+            fi
+            
+            # Step 4: Configure SSH with pam_shells (requires valid shell)
+            echo -e "\n${BOLD}Step 4: Configuring SSH to require valid shells...${NC}"
+            print_info "This prevents users without valid shells from SSH login"
+            
+            if [[ -f "$sshd_pam" ]]; then
+                if confirm_action "Add shell validation to SSH PAM?"; then
+                    cp "$sshd_pam" "${sshd_pam}.bak.$(date +%Y%m%d_%H%M%S)"
+                    print_success "Created backup of sshd PAM config"
+                    
+                    # Check if pam_shells is already configured
+                    if ! grep -q "pam_shells.so" "$sshd_pam"; then
+                        # Add pam_shells at the beginning of auth section
+                        sed -i '/@include common-auth/i auth required pam_shells.so' "$sshd_pam"
+                        print_success "Added shell validation to SSH"
+                        changes_made=true
+                    else
+                        print_info "SSH shell validation already configured"
+                    fi
+                fi
+            else
+                print_warning "$sshd_pam not found"
+            fi
+            
+            # Step 5: Create PAM configuration profiles (ADVANCED - optional)
+            echo -e "\n${BOLD}Step 5: Creating PAM configuration profiles...${NC}"
+            print_info "These enable advanced faillock features via pam-auth-update"
+            print_warning "OPTIONAL: Skip if you're unsure"
+            
+            if confirm_action "Create PAM configuration profiles for faillock?"; then
+                local faillock_config="/usr/share/pam-configs/faillock"
+                local faillock_notify_config="/usr/share/pam-configs/faillock_notify"
+                
+                # Create /usr/share/pam-configs/faillock
+                if [[ ! -f "$faillock_config" ]]; then
+                    cat > "$faillock_config" << 'EOF'
+Name: Enforce failed login attempt counter
+Default: no
+Priority: 0
+Auth-Type: Primary
+Auth:
+	[default=die] pam_faillock.so authfail
+	sufficient pam_faillock.so authsucc
+EOF
+                    print_success "Created PAM faillock config profile"
+                    changes_made=true
+                else
+                    print_info "PAM faillock config already exists"
+                fi
+                
+                # Create /usr/share/pam-configs/faillock_notify
+                if [[ ! -f "$faillock_notify_config" ]]; then
+                    cat > "$faillock_notify_config" << 'EOF'
+Name: Notify on failed login attempts
+Default: no
+Priority: 1024
+Auth-Type: Primary
+Auth:
+	requisite pam_faillock.so preauth
+EOF
+                    print_success "Created PAM faillock notify config profile"
+                    changes_made=true
+                else
+                    print_info "PAM faillock notify config already exists"
+                fi
+                
+                # Prompt to run pam-auth-update
+                print_info "PAM profiles created"
+                print_warning "You should run 'sudo pam-auth-update' to enable these profiles"
+                print_info "Select both options when prompted:"
+                print_info "  [*] Notify on failed login attempts"
+                print_info "  [*] Enforce failed login attempt counter"
+                
+                if confirm_action "Run pam-auth-update now (interactive)?"; then
+                    print_warning "Use SPACE to select, ENTER to confirm"
+                    pam-auth-update
+                fi
+            fi
+            
+            # Summary
             print_info "  - Lock after: 5 failed attempts"
             print_info "  - Lockout duration: 15 minutes (auto-unlock)"
             print_info "  - Applies to: ALL users (cannot exempt specific users)"
             print_warning "  - Admin can unlock with: faillock --user <username> --reset"
+            print_info "  - PAM common-auth: faillock enabled"
+            print_info "  - GDM: root login disabled"
+            print_info "  - SSH: shell validation enabled"
         fi
     else
         print_warning "Faillock not found - account lockout not configured"
@@ -1156,6 +1313,23 @@ EOF
         echo -e "${YELLOW}!${NC} Account lockout: NOT CONFIGURED"
     fi
     
+    # Check PAM configurations
+    if [[ -f "/etc/pam.d/common-auth" ]]; then
+        if grep -q "pam_faillock.so preauth" /etc/pam.d/common-auth 2>/dev/null; then
+            echo -e "${GREEN}✓${NC} PAM faillock: ENABLED in common-auth"
+        else
+            echo -e "${YELLOW}!${NC} PAM faillock: NOT ENABLED in common-auth"
+        fi
+    fi
+    
+    if [[ -f "/etc/pam.d/gdm-password" ]] && grep -q "pam_succeed_if.so user != root" /etc/pam.d/gdm-password 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} GDM root login: DISABLED"
+    fi
+    
+    if [[ -f "/etc/pam.d/sshd" ]] && grep -q "pam_shells.so" /etc/pam.d/sshd 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} SSH shell validation: ENABLED"
+    fi
+    
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
     print_warning "IMPORTANT: Policies are SYSTEM-WIDE and affect most users"
@@ -1174,15 +1348,295 @@ EOF
 }
 
 #############################################
-# Task 5: Service Audit
+# Task 5: Service Audit & Prohibited Software Removal
 #############################################
 
 audit_services() {
-    print_header "SERVICE AUDIT"
-    print_info "This module will audit running services"
-    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    print_header "SERVICE AUDIT & PROHIBITED SOFTWARE REMOVAL"
+    print_info "This module will remove prohibited packages and disable unauthorized services"
+    
+    local changes_made=false
+    local packages_removed=0
+    local services_disabled=0
+    
+    # Define prohibited packages
+    local prohibited_packages=(
+        "aircrack-ng"
+        "apache2"
+        "dnsutils"
+        "ettercap-text-only"
+        "ettercap-graphical"
+        "ettercap-common"
+        "ftp"
+        "hping3"
+        "hydra"
+        "john"
+        "kismet"
+        "nessus"
+        "netcat"
+        "netcat-traditional"
+        "netcat-openbsd"
+        "nikto"
+        "nmap"
+        "ophcrack"
+        "rsh-client"
+        "rsh-server"
+        "samba"
+        "snort"
+        "tcpdump"
+        "telnet"
+        "telnetd"
+        "wireshark"
+        "wireshark-qt"
+        "wireshark-common"
+    )
+    
+    # Define prohibited services
+    local prohibited_services=(
+        "apache2"
+        "apache"
+        "nginx"
+        "lighttpd"
+        "jetty"
+        "httpd"
+        "vsftpd"
+        "ftpd"
+        "telnet"
+        "telnetd"
+        "samba"
+        "smbd"
+        "nmbd"
+        "snmpd"
+        "nis"
+        "nfs-common"
+        "nfs-kernel-server"
+        "rpcbind"
+    )
+    
+    # Check if SSH should be kept
+    echo -e "\n${CYAN}SSH Configuration Check${NC}"
+    local keep_ssh=false
+    if confirm_action "Is SSH/OpenSSH required for this system (check README)?"; then
+        keep_ssh=true
+        print_info "SSH will be kept and secured"
+    else
+        print_warning "SSH will be considered for removal"
+        prohibited_packages+=("openssh-server" "ssh")
+        prohibited_services+=("ssh" "sshd")
+    fi
+    
+    # Part 1: Remove Prohibited Packages (confirm per-package)
+    echo -e "\n${BOLD}Step 1: Scanning for prohibited packages...${NC}"
+    print_info "Checking for hacking tools, unnecessary servers, and prohibited software"
+    
+    declare -a found_packages=()
+    
+    for pkg in "${prohibited_packages[@]}"; do
+        if dpkg -l | grep -q "^ii.*$pkg"; then
+            found_packages+=("$pkg")
+        fi
+    done
+    
+    if [[ ${#found_packages[@]} -eq 0 ]]; then
+        print_success "No prohibited packages found!"
+    else
+        print_warning "Found ${#found_packages[@]} prohibited package(s):"
+        for pkg in "${found_packages[@]}"; do
+            echo -e "  ${YELLOW}•${NC} $pkg"
+        done
+        
+        # Confirm and remove each package individually
+        for pkg in "${found_packages[@]}"; do
+            if confirm_action "Remove package: $pkg?"; then
+                echo -e "\n${CYAN}Removing: $pkg${NC}"
+                
+                # Try purge first (removes package and config files)
+                if apt purge -y "$pkg" 2>/dev/null; then
+                    print_success "Purged: $pkg"
+                    ((packages_removed++))
+                    changes_made=true
+                    log_message "REMOVED PACKAGE: $pkg"
+                elif apt remove --purge -y "$pkg" 2>/dev/null; then
+                    print_success "Removed: $pkg"
+                    ((packages_removed++))
+                    changes_made=true
+                    log_message "REMOVED PACKAGE: $pkg"
+                else
+                    print_warning "Could not remove: $pkg (may not be installed or removal failed)"
+                fi
+            else
+                print_info "Skipped removal of: $pkg"
+            fi
+        done
+        
+        # Check for netcat in /etc
+        echo -e "\n${BOLD}Checking for netcat references in /etc...${NC}"
+        if grep -r "netcat" /etc 2>/dev/null | head -5; then
+            print_warning "Found netcat references in /etc (shown above)"
+            if confirm_action "Review and manually clean netcat references?"; then
+                print_info "Use: sudo grep -r netcat /etc"
+                print_info "Then manually edit the files to remove references"
+            fi
+        else
+            print_success "No netcat references found in /etc"
+        fi
+        
+        # Run autoremove to clean up dependencies
+        echo -e "\n${BOLD}Cleaning up unused dependencies...${NC}"
+        if confirm_action "Run apt autoremove to clean up?"; then
+            apt autoremove -y
+            print_success "Cleaned up unused dependencies"
+        fi
+    fi
+    
+    # Part 2: Audit and Disable Prohibited Services (confirm per-service)
+    echo -e "\n${BOLD}Step 2: Scanning for prohibited services...${NC}"
+    print_info "Checking active services that should be disabled"
+    
+    declare -a found_services=()
+    
+    # Get list of active or enabled prohibited services
+    for service in "${prohibited_services[@]}"; do
+        # Check if service exists and is active
+        if systemctl list-units --type=service --state=active 2>/dev/null | grep -q "$service"; then
+            found_services+=("$service")
+        elif systemctl is-enabled "$service" 2>/dev/null | grep -q "enabled"; then
+            found_services+=("$service")
+        fi
+    done
+    
+    if [[ ${#found_services[@]} -eq 0 ]]; then
+        print_success "No prohibited services found running!"
+    else
+        print_warning "Found ${#found_services[@]} service(s) that may need disabling:"
+        
+        for svc in "${found_services[@]}"; do
+            # Get service status
+            local status=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+            local enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "disabled")
+            echo -e "  ${YELLOW}•${NC} $svc (status: $status, enabled: $enabled)"
+        done
+        
+        # Confirm and disable/stop each service individually
+        for svc in "${found_services[@]}"; do
+            local status=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+            local enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "disabled")
+            echo -e "\n${CYAN}Service: $svc (status: $status, enabled: $enabled)${NC}"
+            
+            if confirm_action "Disable and stop service: $svc?"; then
+                echo -e "${CYAN}Disabling service: $svc${NC}"
+                
+                # Unmask if masked
+                systemctl unmask "$svc" 2>/dev/null
+                
+                # Stop the service
+                if systemctl stop "$svc" 2>/dev/null; then
+                    print_success "Stopped: $svc"
+                fi
+                
+                # Disable the service
+                if systemctl disable "$svc" 2>/dev/null; then
+                    print_success "Disabled: $svc"
+                    ((services_disabled++))
+                    changes_made=true
+                    log_message "DISABLED SERVICE: $svc"
+                else
+                    print_warning "Could not disable: $svc (may not exist or already disabled)"
+                fi
+                
+                # Verify it's stopped
+                if systemctl is-active "$svc" 2>/dev/null | grep -q "inactive"; then
+                    print_success "Verified: $svc is inactive"
+                fi
+            else
+                print_info "Skipped disabling: $svc"
+            fi
+        done
+    fi
+    
+    # Part 3: Show all active services for manual review
+    echo -e "\n${BOLD}Step 3: Active Services Review${NC}"
+    if confirm_action "Display all currently active services for review?"; then
+        echo -e "\n${CYAN}Currently Active Services:${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        systemctl list-units --type=service --state=active --no-pager | grep -v "^UNIT" | head -20
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        
+        echo -e "\n${YELLOW}To check a specific service:${NC}"
+        echo -e "  sudo systemctl status <service-name>"
+        echo -e "${YELLOW}To disable a service manually:${NC}"
+        echo -e "  sudo systemctl disable --now <service-name>"
+    fi
+    
+    # Part 4: Security recommendations
+    echo -e "\n${BOLD}Security Recommendations:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Check for web servers
+    if systemctl is-active apache2 &>/dev/null || systemctl is-active nginx &>/dev/null; then
+        echo -e "${YELLOW}!${NC} Web server detected - disable if not needed"
+    else
+        echo -e "${GREEN}✓${NC} No active web servers"
+    fi
+    
+    # Check for FTP
+    if systemctl is-active vsftpd &>/dev/null || systemctl is-active ftpd &>/dev/null; then
+        echo -e "${YELLOW}!${NC} FTP server detected - FTP is insecure, use SFTP instead"
+    else
+        echo -e "${GREEN}✓${NC} No FTP servers active"
+    fi
+    
+    # Check for Telnet
+    if systemctl is-active telnet &>/dev/null || dpkg -l | grep -q "^ii.*telnet"; then
+        echo -e "${RED}!${NC} Telnet detected - CRITICAL: Remove immediately (unencrypted)"
+    else
+        echo -e "${GREEN}✓${NC} No Telnet found"
+    fi
+    
+    # Check for Samba
+    if systemctl is-active smbd &>/dev/null || systemctl is-active nmbd &>/dev/null; then
+        echo -e "${YELLOW}!${NC} Samba detected - disable if file sharing not needed"
+    else
+        echo -e "${GREEN}✓${NC} Samba not active"
+    fi
+    
+    # Check for SSH
+    if systemctl is-active sshd &>/dev/null || systemctl is-active ssh &>/dev/null; then
+        if [[ "$keep_ssh" == true ]]; then
+            echo -e "${GREEN}✓${NC} SSH active (required per configuration)"
+        else
+            echo -e "${YELLOW}!${NC} SSH active - consider disabling if not needed"
+        fi
+    else
+        echo -e "${GREEN}✓${NC} SSH not active"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Final Summary
+    echo -e "\n${BOLD}Service Audit Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}[i]${NC} Prohibited packages removed: $packages_removed"
+    echo -e "${BLUE}[i]${NC} Services disabled: $services_disabled"
+    
+    if [[ "$keep_ssh" == true ]]; then
+        echo -e "${GREEN}✓${NC} SSH retained (as required)"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "Service audit and cleanup completed"
+        print_warning "IMPORTANT: Review the README for required services"
+        print_info "Removed packages are logged to: $LOG_FILE"
+    else
+        print_info "No changes were made"
+    fi
+    
+    print_header "SERVICE AUDIT COMPLETE"
     press_enter
 }
+
 
 #############################################
 # Task 6: File Permissions Audit
@@ -1211,9 +1665,130 @@ update_system() {
 #############################################
 
 remove_prohibited_software() {
-    print_header "REMOVE PROHIBITED SOFTWARE"
-    print_info "This module will scan for and remove prohibited software"
-    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    print_header "REMOVE PROHIBITED SOFTWARE & MEDIA FILES"
+    print_info "This module will scan for unauthorized media files"
+    
+    local changes_made=false
+    local files_removed=0
+    local files_kept=0
+    
+    # Define media file extensions to search for
+    local media_extensions=(
+        "mp3" "mp4" "avi" "mov" "wmv" "flv" "mkv"     # Video/Audio
+        "wav" "flac" "aac" "ogg" "m4a"                 # Audio
+        "jpg" "jpeg" "png" "gif" "bmp" "tiff" "webp"  # Images
+        "iso" "img" "dmg"                              # Disk images
+        "exe" "msi" "apk"                              # Executables (suspicious)
+        "txt"                                          #leftover messages / files
+    )
+    
+    # Directories to search (user home directories)
+    echo -e "\n${BOLD}Scanning for media files in user directories...${NC}"
+    print_warning "This will search /home for potentially unauthorized media files"
+    
+    if ! confirm_action "Start scanning for media files?"; then
+        print_info "Media file scan cancelled"
+        press_enter
+        return
+    fi
+    
+    # Create array to store found files
+    declare -a found_files=()
+    
+    # Search for each extension
+    echo -e "\n${CYAN}Searching for media files...${NC}"
+    for ext in "${media_extensions[@]}"; do
+        echo -e "${BLUE}[i]${NC} Scanning for .$ext files..."
+        
+        # Find files with this extension in /home (excluding hidden directories)
+        while IFS= read -r -d '' file; do
+            # Skip files in .cache, .local, .config, etc.
+            if [[ ! "$file" =~ /\.[^/]+/ ]]; then
+                found_files+=("$file")
+            fi
+        done < <(find /home -type f -iname "*.${ext}" ! -path "*/.*/*" -print0 2>/dev/null)
+    done
+    
+    # Display results
+    echo -e "\n${BOLD}Scan Results:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ ${#found_files[@]} -eq 0 ]]; then
+        print_success "No media files found!"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        press_enter
+        return
+    fi
+    
+    print_warning "Found ${#found_files[@]} media file(s)"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Ask if user wants to review files
+    if ! confirm_action "Review and delete media files?"; then
+        print_info "Media file removal cancelled"
+        press_enter
+        return
+    fi
+    
+    # Review each file
+    echo -e "\n${BOLD}Reviewing media files...${NC}"
+    echo -e "${YELLOW}You will be prompted for each file${NC}\n"
+    
+    for file in "${found_files[@]}"; do
+        # Get file info
+        local file_size=$(du -h "$file" 2>/dev/null | cut -f1)
+        local file_owner=$(stat -c "%U" "$file" 2>/dev/null)
+        local file_modified=$(stat -c "%y" "$file" 2>/dev/null | cut -d' ' -f1)
+        
+        # Display file info
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BOLD}File:${NC} $file"
+        echo -e "${BOLD}Size:${NC} $file_size"
+        echo -e "${BOLD}Owner:${NC} $file_owner"
+        echo -e "${BOLD}Modified:${NC} $file_modified"
+        
+        # Show file type (if available)
+        if command -v file &>/dev/null; then
+            local file_type=$(file -b "$file" 2>/dev/null)
+            echo -e "${BOLD}Type:${NC} $file_type"
+        fi
+        
+        # Prompt to delete
+        if confirm_action "Delete this file?"; then
+            if rm -f "$file" 2>/dev/null; then
+                print_success "Deleted: $file"
+                ((files_removed++))
+                changes_made=true
+                
+                # Log to audit log
+                log_message "REMOVED MEDIA FILE: $file (size: $file_size, owner: $file_owner)"
+            else
+                print_error "Failed to delete: $file (check permissions)"
+            fi
+        else
+            print_info "Kept: $file"
+            ((files_kept++))
+        fi
+        
+        echo ""
+    done
+    
+    # Final summary
+    echo -e "${BOLD}Media File Removal Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}[i]${NC} Total files found: ${#found_files[@]}"
+    echo -e "${GREEN}✓${NC} Files removed: $files_removed"
+    echo -e "${YELLOW}!${NC} Files kept: $files_kept"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "Media file cleanup completed"
+        print_info "Removed files are permanently deleted"
+    else
+        print_info "No files were removed"
+    fi
+    
+    print_header "MEDIA FILE REMOVAL COMPLETE"
     press_enter
 }
 
