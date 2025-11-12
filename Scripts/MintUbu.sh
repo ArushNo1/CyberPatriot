@@ -108,7 +108,7 @@ EOF
     echo -e "${YELLOW}                    System: $(hostname)${NC}"
     echo -e "${YELLOW}                    Date: $(date)${NC}"
     echo ""
-    sleep 2
+    sleep 1
 }
 
 #############################################
@@ -1847,12 +1847,95 @@ EOF
 
 update_system() {
     print_header "SYSTEM UPDATE"
-    print_info "This module will update the system packages"
+    print_info "This module will update the system and configure automatic updates"
     
     local changes_made=false
     
-    # 1. Update package lists
-    echo -e "\n${BOLD}Updating package lists...${NC}"
+    # 1. Configure automatic updates
+    echo -e "\n${BOLD}Step 1: Configure Automatic Security Updates${NC}"
+    print_info "Configuring unattended-upgrades for automatic security updates"
+    
+    if confirm_action "Enable automatic security updates?"; then
+        # Install unattended-upgrades if not present
+        if ! dpkg -l | grep -q "^ii.*unattended-upgrades"; then
+            print_info "Installing unattended-upgrades..."
+            apt install -y unattended-upgrades apt-listchanges
+        fi
+        
+        # Configure unattended-upgrades
+        local unattended_conf="/etc/apt/apt.conf.d/50unattended-upgrades"
+        
+        if [[ -f "$unattended_conf" ]]; then
+            # Backup original
+            cp "$unattended_conf" "${unattended_conf}.backup.$(date +%Y%m%d_%H%M%S)"
+            
+            # Enable automatic security updates
+            cat > "$unattended_conf" << 'EOF'
+// Automatically upgrade packages from these origins
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+
+// List of packages to not update automatically
+Unattended-Upgrade::Package-Blacklist {
+};
+
+// Split the upgrade into the smallest possible chunks
+Unattended-Upgrade::MinimalSteps "true";
+
+// Send email to this address for problems or packages upgrades
+Unattended-Upgrade::Mail "root";
+
+// Set this value to "true" to get emails only on errors
+Unattended-Upgrade::MailOnlyOnError "true";
+
+// Remove unused automatically installed kernel-related packages
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+
+// Remove unused dependencies after the upgrade
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+// Automatically reboot *WITHOUT CONFIRMATION* if a restart is required after the upgrade
+Unattended-Upgrade::Automatic-Reboot "false";
+
+// If automatic reboot is enabled and needed, reboot at this time
+Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+EOF
+            print_success "Configured unattended-upgrades"
+            changes_made=true
+        fi
+        
+        # Configure automatic update intervals
+        local auto_upgrades="/etc/apt/apt.conf.d/20auto-upgrades"
+        cat > "$auto_upgrades" << 'EOF'
+// Enable the update/upgrade script (0=disable)
+APT::Periodic::Enable "1";
+
+// Do "apt-get update" automatically every n-days (0=disable)
+APT::Periodic::Update-Package-Lists "1";
+
+// Do "apt-get upgrade --download-only" every n-days (0=disable)
+APT::Periodic::Download-Upgradeable-Packages "1";
+
+// Do "apt-get autoclean" every n-days (0=disable)
+APT::Periodic::AutocleanInterval "7";
+
+// Run the "unattended-upgrade" security upgrade script every n-days (0=disabled)
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+        print_success "Configured automatic update intervals (daily)"
+        changes_made=true
+        
+        # Enable and start the service
+        systemctl enable unattended-upgrades
+        systemctl start unattended-upgrades
+        print_success "Enabled automatic security updates service"
+    fi
+    
+    # 2. Update package lists
+    echo -e "\n${BOLD}Step 2: Update Package Lists${NC}"
     if confirm_action "Update apt package lists?"; then
         apt update
         if [[ $? -eq 0 ]]; then
@@ -1863,20 +1946,40 @@ update_system() {
         fi
     fi
     
-    # 2. Upgrade installed packages
-    echo -e "\n${BOLD}Upgrading installed packages...${NC}"
-    if confirm_action "Upgrade all installed packages?"; then
-        apt upgrade -y
-        if [[ $? -eq 0 ]]; then
-            print_success "Packages upgraded successfully"
-            changes_made=true
-        else
-            print_error "Failed to upgrade packages"
+    # 3. Check for available updates
+    echo -e "\n${BOLD}Step 3: Check Available Updates${NC}"
+    local security_updates=$(apt list --upgradable 2>/dev/null | grep -i security | wc -l)
+    local total_updates=$(apt list --upgradable 2>/dev/null | grep -c "upgradable")
+    
+    if [[ $total_updates -gt 0 ]]; then
+        echo -e "${YELLOW}!${NC} Available updates: $total_updates total, $security_updates security-related"
+        
+        if confirm_action "Show list of available updates?"; then
+            apt list --upgradable 2>/dev/null | grep -v "Listing"
         fi
+    else
+        print_success "System is up to date - no updates available"
     fi
     
-    # 3. Distribution upgrade (optional)
-    echo -e "\n${BOLD}Distribution upgrade...${NC}"
+    # 4. Upgrade installed packages
+    echo -e "\n${BOLD}Step 4: Upgrade Installed Packages${NC}"
+    if [[ $total_updates -gt 0 ]]; then
+        if confirm_action "Upgrade all installed packages?"; then
+            apt upgrade -y
+            if [[ $? -eq 0 ]]; then
+                print_success "Packages upgraded successfully"
+                changes_made=true
+            else
+                print_error "Failed to upgrade packages"
+            fi
+        fi
+    else
+        print_info "No packages to upgrade"
+    fi
+    
+    # 5. Distribution upgrade
+    echo -e "\n${BOLD}Step 5: Distribution Upgrade${NC}"
+    print_info "This handles changing dependencies with new package versions"
     if confirm_action "Perform distribution upgrade (dist-upgrade)?"; then
         apt dist-upgrade -y
         if [[ $? -eq 0 ]]; then
@@ -1887,8 +1990,53 @@ update_system() {
         fi
     fi
     
-    # 4. Remove unused packages
-    echo -e "\n${BOLD}Removing unused packages...${NC}"
+    # 6. Update specific applications from README
+    echo -e "\n${BOLD}Step 6: Update Critical Applications${NC}"
+    print_info "Checking critical applications for updates"
+    
+    # Define critical packages to ensure are updated
+    local critical_packages=(
+        "firefox"
+        "chromium-browser"
+        "libreoffice"
+        "thunderbird"
+        "openssh-server"
+        "openssh-client"
+        "apache2"
+        "nginx"
+        "mysql-server"
+        "postgresql"
+    )
+    
+    if confirm_action "Update critical applications?"; then
+        local updated_count=0
+        for pkg in "${critical_packages[@]}"; do
+            if dpkg -l | grep -q "^ii.*$pkg"; then
+                echo -e "${CYAN}→${NC} Updating $pkg..."
+                apt install --only-upgrade -y "$pkg" 2>/dev/null
+                if [[ $? -eq 0 ]]; then
+                    ((updated_count++))
+                fi
+            fi
+        done
+        print_success "Checked/updated $updated_count critical applications"
+        changes_made=true
+    fi
+    
+    # 7. Update snap packages (if snap is installed)
+    if command -v snap &>/dev/null; then
+        echo -e "\n${BOLD}Step 7: Update Snap Packages${NC}"
+        if confirm_action "Update snap packages?"; then
+            snap refresh
+            if [[ $? -eq 0 ]]; then
+                print_success "Snap packages updated"
+                changes_made=true
+            fi
+        fi
+    fi
+    
+    # 8. Remove unused packages
+    echo -e "\n${BOLD}Step 8: Remove Unused Packages${NC}"
     if confirm_action "Remove unused packages (autoremove)?"; then
         apt autoremove -y
         if [[ $? -eq 0 ]]; then
@@ -1897,8 +2045,8 @@ update_system() {
         fi
     fi
     
-    # 5. Clean package cache
-    echo -e "\n${BOLD}Cleaning package cache...${NC}"
+    # 9. Clean package cache
+    echo -e "\n${BOLD}Step 9: Clean Package Cache${NC}"
     if confirm_action "Clean apt cache (autoclean)?"; then
         apt autoclean
         if [[ $? -eq 0 ]]; then
@@ -1907,13 +2055,28 @@ update_system() {
         fi
     fi
     
+    # 10. Check if reboot is required
+    echo -e "\n${BOLD}Step 10: Reboot Check${NC}"
+    if [[ -f /var/run/reboot-required ]]; then
+        echo -e "${RED}!${NC} System reboot is required"
+        if [[ -f /var/run/reboot-required.pkgs ]]; then
+            echo -e "${YELLOW}Packages requiring reboot:${NC}"
+            cat /var/run/reboot-required.pkgs | sed 's/^/  - /'
+        fi
+        print_info "Please reboot the system when convenient"
+    else
+        print_success "No reboot required"
+    fi
+    
     # Summary
     echo -e "\n${BOLD}System Update Summary:${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
     if [[ "$changes_made" == true ]]; then
         echo -e "${GREEN}✓${NC} System has been updated"
-        print_info "Consider rebooting if kernel was updated"
+        echo -e "${GREEN}✓${NC} Automatic security updates configured"
+        echo -e "${GREEN}✓${NC} Update check interval: Daily"
+        echo -e "${GREEN}✓${NC} Security updates: Download and install automatically"
     else
         echo -e "${BLUE}[i]${NC} No updates were performed"
     fi
