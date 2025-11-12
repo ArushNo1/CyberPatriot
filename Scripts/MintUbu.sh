@@ -1420,6 +1420,36 @@ audit_services() {
             print_success "No netcat references found in /etc"
         fi
         
+        # Check for netcat in /etc
+        echo -e "\n${BOLD}Checking for netcat references in /etc...${NC}"
+        if grep -r "netcat" /etc 2>/dev/null | head -5; then
+            print_warning "Found netcat references in /etc (shown above)"
+            if confirm_action "Review and manually clean netcat references?"; then
+                print_info "Use: sudo grep -r netcat /etc"
+                print_info "Then manually edit the files to remove references"
+            fi
+        else
+            print_success "No netcat references found in /etc"
+        fi
+        
+        # Remove unwanted Chrome extensions and hacking tools
+        echo -e "\n${BOLD}Removing Chrome extensions and security tools...${NC}"
+        local unwanted_extra=("chrome-extension" "sqlmap" "wapiti")
+        
+        if confirm_action "Remove Chrome extensions and SQL injection tools?"; then
+            for pkg in "${unwanted_extra[@]}"; do
+                if dpkg -l | grep -q "$pkg"; then
+                    apt remove -y "$pkg" 2>/dev/null
+                    if [[ $? -eq 0 ]]; then
+                        print_success "Removed $pkg"
+                        ((packages_removed++))
+                        changes_made=true
+                        log_message "REMOVED PACKAGE: $pkg"
+                    fi
+                fi
+            done
+        fi
+        
         # Run autoremove to clean up dependencies
         echo -e "\n${BOLD}Cleaning up unused dependencies...${NC}"
         if confirm_action "Run apt autoremove to clean up?"; then
@@ -1552,6 +1582,44 @@ audit_services() {
     
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
+    # Part 5: Enable Security Services
+    echo -e "\n${BOLD}Step 4: Security Services${NC}"
+    print_info "Enabling critical security services"
+    
+    # Enable AppArmor
+    echo -e "\n${BOLD}Checking AppArmor...${NC}"
+    if ! systemctl is-active apparmor &>/dev/null; then
+        if confirm_action "Enable and start AppArmor?"; then
+            systemctl enable apparmor 2>/dev/null
+            systemctl start apparmor 2>/dev/null
+            if [[ $? -eq 0 ]]; then
+                print_success "AppArmor enabled and started"
+                changes_made=true
+            else
+                print_error "Failed to enable AppArmor (may not be installed)"
+            fi
+        fi
+    else
+        print_success "AppArmor already running"
+    fi
+    
+    # Enable rsyslog
+    echo -e "\n${BOLD}Checking rsyslog...${NC}"
+    if ! systemctl is-active rsyslog &>/dev/null; then
+        if confirm_action "Enable and start rsyslog (system logging)?"; then
+            systemctl enable rsyslog 2>/dev/null
+            systemctl start rsyslog 2>/dev/null
+            if [[ $? -eq 0 ]]; then
+                print_success "rsyslog enabled and started"
+                changes_made=true
+            else
+                print_error "Failed to enable rsyslog"
+            fi
+        fi
+    else
+        print_success "rsyslog already running"
+    fi
+    
     # Final Summary
     echo -e "\n${BOLD}Service Audit Summary:${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1583,8 +1651,193 @@ audit_services() {
 
 audit_file_permissions() {
     print_header "FILE PERMISSIONS AUDIT"
-    print_info "This module will check critical file permissions"
-    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    print_info "This module will secure critical system file permissions"
+    
+    local changes_made=false
+    
+    # 1. Secure /etc/shadow permissions
+    echo -e "\n${BOLD}Checking /etc/shadow permissions...${NC}"
+    
+    if [[ -f "/etc/shadow" ]]; then
+        local current_perms=$(stat -c "%a" /etc/shadow 2>/dev/null)
+        print_info "Current /etc/shadow permissions: $current_perms"
+        
+        if [[ "$current_perms" != "640" ]]; then
+            if confirm_action "Set /etc/shadow permissions to 640 (root:shadow rw-r-----)?"; then
+                chmod 640 /etc/shadow
+                if [[ $? -eq 0 ]]; then
+                    print_success "Set /etc/shadow permissions to 640"
+                    changes_made=true
+                else
+                    print_error "Failed to change /etc/shadow permissions"
+                fi
+            fi
+        else
+            print_success "/etc/shadow already has secure permissions (640)"
+        fi
+    else
+        print_error "/etc/shadow not found"
+    fi
+    
+    # 2. Configure sudoers file
+    echo -e "\n${BOLD}Configuring sudoers file...${NC}"
+    print_info "This will open visudo to verify secure sudo configuration"
+    print_warning "Recommended settings:"
+    echo -e "  ${CYAN}Defaults authenticate${NC}"
+    echo -e "  ${CYAN}root ALL=(ALL:ALL) ALL${NC}"
+    echo -e "  ${CYAN}%admin ALL=(ALL) ALL${NC}"
+    echo -e "  ${CYAN}%sudo ALL=(ALL:ALL) ALL${NC}"
+    
+    if confirm_action "Open visudo to review/edit sudoers file?"; then
+        print_warning "Remove unauthorized entries, keep @includedir and Defaults lines"
+        visudo
+        print_success "Finished editing sudoers"
+        changes_made=true
+    fi
+    
+    # 3. Secure /proc with hidepid
+    echo -e "\n${BOLD}Securing /proc filesystem (hidepid)...${NC}"
+    print_info "This prevents users from seeing other users' processes"
+    
+    if ! grep -q "proc /proc proc defaults,hidepid=2" /etc/fstab; then
+        if confirm_action "Add hidepid=2 to /proc in /etc/fstab?"; then
+            cp /etc/fstab /etc/fstab.bak.$(date +%Y%m%d_%H%M%S)
+            print_success "Created backup of /etc/fstab"
+            
+            # Check if proc entry exists
+            if grep -q "^proc /proc" /etc/fstab; then
+                # Modify existing entry
+                sed -i 's|^proc /proc proc.*|proc /proc proc defaults,hidepid=2 0 0|' /etc/fstab
+            else
+                # Add new entry
+                echo "proc /proc proc defaults,hidepid=2 0 0" >> /etc/fstab
+            fi
+            
+            print_success "Added hidepid=2 to /etc/fstab"
+            
+            if confirm_action "Remount /proc now to apply changes?"; then
+                mount -o remount /proc
+                print_success "Remounted /proc with hidepid=2"
+            fi
+            
+            changes_made=true
+        fi
+    else
+        print_success "/proc already configured with hidepid=2"
+    fi
+    
+    # 4. Secure /tmp with noexec, nodev, nosuid
+    echo -e "\n${BOLD}Securing /tmp filesystem...${NC}"
+    print_info "This prevents execution of binaries from /tmp"
+    
+    if ! grep -q "tmpfs /tmp tmpfs defaults,noexec,nodev,nosuid" /etc/fstab; then
+        if confirm_action "Configure /tmp with noexec,nodev,nosuid in /etc/fstab?"; then
+            if [[ ! -f "/etc/fstab.bak.$(date +%Y%m%d)" ]]; then
+                cp /etc/fstab /etc/fstab.bak.$(date +%Y%m%d_%H%M%S)
+            fi
+            
+            # Check if /tmp entry exists
+            if grep -q "^tmpfs /tmp" /etc/fstab; then
+                # Modify existing entry
+                sed -i 's|^tmpfs /tmp tmpfs.*|tmpfs /tmp tmpfs defaults,noexec,nodev,nosuid 0 0|' /etc/fstab
+            else
+                # Add new entry
+                echo "tmpfs /tmp tmpfs defaults,noexec,nodev,nosuid 0 0" >> /etc/fstab
+            fi
+            
+            print_success "Added secure /tmp mount to /etc/fstab"
+            
+            if confirm_action "Remount /tmp now to apply changes?"; then
+                mount -o remount /tmp
+                print_success "Remounted /tmp with noexec,nodev,nosuid"
+            fi
+            
+            changes_made=true
+        fi
+    else
+        print_success "/tmp already configured securely"
+    fi
+    
+    # 5. Configure /etc/host.conf
+    echo -e "\n${BOLD}Configuring /etc/host.conf...${NC}"
+    print_info "This configures hostname resolution order"
+    
+    if [[ -f "/etc/host.conf" ]]; then
+        cp /etc/host.conf /etc/host.conf.bak.$(date +%Y%m%d_%H%M%S)
+        
+        local needs_update=false
+        if ! grep -q "^order hosts, bind" /etc/host.conf; then
+            needs_update=true
+        fi
+        if ! grep -q "^multi on" /etc/host.conf; then
+            needs_update=true
+        fi
+        
+        if [[ "$needs_update" == true ]]; then
+            if confirm_action "Configure /etc/host.conf with secure settings?"; then
+                cat > /etc/host.conf << 'EOF'
+# /etc/host.conf - CyberPatriot Secure Configuration
+order hosts, bind
+multi on
+EOF
+                print_success "Configured /etc/host.conf"
+                changes_made=true
+            fi
+        else
+            print_success "/etc/host.conf already configured"
+        fi
+    else
+        if confirm_action "Create /etc/host.conf with secure settings?"; then
+            cat > /etc/host.conf << 'EOF'
+# /etc/host.conf - CyberPatriot Secure Configuration
+order hosts, bind
+multi on
+EOF
+            print_success "Created /etc/host.conf"
+            changes_made=true
+        fi
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}File Permissions Audit Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ -f "/etc/shadow" ]]; then
+        local shadow_perms=$(stat -c "%a" /etc/shadow 2>/dev/null)
+        if [[ "$shadow_perms" == "640" ]]; then
+            echo -e "${GREEN}✓${NC} /etc/shadow permissions: 640 (secure)"
+        else
+            echo -e "${YELLOW}!${NC} /etc/shadow permissions: $shadow_perms"
+        fi
+    fi
+    
+    if grep -q "proc /proc proc defaults,hidepid=2" /etc/fstab; then
+        echo -e "${GREEN}✓${NC} /proc hidepid: Configured"
+    else
+        echo -e "${YELLOW}!${NC} /proc hidepid: Not configured"
+    fi
+    
+    if grep -q "tmpfs /tmp tmpfs defaults,noexec,nodev,nosuid" /etc/fstab; then
+        echo -e "${GREEN}✓${NC} /tmp security: Configured"
+    else
+        echo -e "${YELLOW}!${NC} /tmp security: Not configured"
+    fi
+    
+    if [[ -f "/etc/host.conf" ]] && grep -q "^order hosts, bind" /etc/host.conf; then
+        echo -e "${GREEN}✓${NC} /etc/host.conf: Configured"
+    else
+        echo -e "${YELLOW}!${NC} /etc/host.conf: Not configured"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "File permissions audit completed successfully"
+    else
+        print_info "No changes were made"
+    fi
+    
+    print_header "FILE PERMISSIONS AUDIT COMPLETE"
     press_enter
 }
 
@@ -1594,8 +1847,80 @@ audit_file_permissions() {
 
 update_system() {
     print_header "SYSTEM UPDATE"
-    print_info "This module will update the system"
-    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    print_info "This module will update the system packages"
+    
+    local changes_made=false
+    
+    # 1. Update package lists
+    echo -e "\n${BOLD}Updating package lists...${NC}"
+    if confirm_action "Update apt package lists?"; then
+        apt update
+        if [[ $? -eq 0 ]]; then
+            print_success "Package lists updated"
+            changes_made=true
+        else
+            print_error "Failed to update package lists"
+        fi
+    fi
+    
+    # 2. Upgrade installed packages
+    echo -e "\n${BOLD}Upgrading installed packages...${NC}"
+    if confirm_action "Upgrade all installed packages?"; then
+        apt upgrade -y
+        if [[ $? -eq 0 ]]; then
+            print_success "Packages upgraded successfully"
+            changes_made=true
+        else
+            print_error "Failed to upgrade packages"
+        fi
+    fi
+    
+    # 3. Distribution upgrade (optional)
+    echo -e "\n${BOLD}Distribution upgrade...${NC}"
+    if confirm_action "Perform distribution upgrade (dist-upgrade)?"; then
+        apt dist-upgrade -y
+        if [[ $? -eq 0 ]]; then
+            print_success "Distribution upgrade completed"
+            changes_made=true
+        else
+            print_error "Failed to perform distribution upgrade"
+        fi
+    fi
+    
+    # 4. Remove unused packages
+    echo -e "\n${BOLD}Removing unused packages...${NC}"
+    if confirm_action "Remove unused packages (autoremove)?"; then
+        apt autoremove -y
+        if [[ $? -eq 0 ]]; then
+            print_success "Removed unused packages"
+            changes_made=true
+        fi
+    fi
+    
+    # 5. Clean package cache
+    echo -e "\n${BOLD}Cleaning package cache...${NC}"
+    if confirm_action "Clean apt cache (autoclean)?"; then
+        apt autoclean
+        if [[ $? -eq 0 ]]; then
+            print_success "Cleaned package cache"
+            changes_made=true
+        fi
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}System Update Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ "$changes_made" == true ]]; then
+        echo -e "${GREEN}✓${NC} System has been updated"
+        print_info "Consider rebooting if kernel was updated"
+    else
+        echo -e "${BLUE}[i]${NC} No updates were performed"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    print_header "SYSTEM UPDATE COMPLETE"
     press_enter
 }
 
@@ -1727,6 +2052,154 @@ remove_prohibited_software() {
         print_info "No files were removed"
     fi
     
+    # Part 5: Audit Cronjobs
+    echo -e "\n${BOLD}Step 4: Cronjob Audit${NC}"
+    print_info "Checking for scheduled tasks (cronjobs) on the system"
+    
+    if ! confirm_action "Scan and review cronjobs?"; then
+        print_info "Cronjob audit skipped"
+        print_header "MEDIA FILE REMOVAL COMPLETE"
+        press_enter
+        return
+    fi
+    
+    local cron_changes=false
+    local crons_removed=0
+    
+    # Check system-wide crontabs
+    echo -e "\n${CYAN}Scanning system-wide crontabs...${NC}"
+    
+    # 1. Check /etc/crontab
+    if [[ -f "/etc/crontab" ]]; then
+        echo -e "\n${BOLD}System Crontab (/etc/crontab):${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        cat /etc/crontab
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        
+        if confirm_action "Edit /etc/crontab to remove suspicious entries?"; then
+            print_warning "Opening /etc/crontab in nano - remove any suspicious lines"
+            nano /etc/crontab
+            print_success "Finished editing /etc/crontab"
+            cron_changes=true
+        fi
+    fi
+    
+    # 2. Check /etc/cron.d/*
+    if [[ -d "/etc/cron.d" ]] && [[ -n "$(ls -A /etc/cron.d 2>/dev/null)" ]]; then
+        echo -e "\n${BOLD}Cron Jobs in /etc/cron.d/:${NC}"
+        for cronfile in /etc/cron.d/*; do
+            if [[ -f "$cronfile" ]]; then
+                echo -e "\n${YELLOW}File: $cronfile${NC}"
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                cat "$cronfile"
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                
+                if confirm_action "Delete this cron file: $(basename $cronfile)?"; then
+                    if rm -f "$cronfile" 2>/dev/null; then
+                        print_success "Deleted: $cronfile"
+                        ((crons_removed++))
+                        cron_changes=true
+                        log_message "REMOVED CRON FILE: $cronfile"
+                    else
+                        print_error "Failed to delete: $cronfile"
+                    fi
+                fi
+            fi
+        done
+    else
+        print_info "No files in /etc/cron.d/"
+    fi
+    
+    # 3. Check user crontabs
+    echo -e "\n${BOLD}User Crontabs:${NC}"
+    local found_user_crons=false
+    
+    # Get list of users with crontabs
+    for user_cron in /var/spool/cron/crontabs/*; do
+        if [[ -f "$user_cron" ]]; then
+            found_user_crons=true
+            local username=$(basename "$user_cron")
+            
+            echo -e "\n${YELLOW}Crontab for user: $username${NC}"
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            crontab -u "$username" -l 2>/dev/null || cat "$user_cron"
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            
+            if confirm_action "Edit crontab for user $username?"; then
+                print_warning "Opening crontab editor - delete suspicious entries or remove all"
+                crontab -u "$username" -e
+                print_success "Finished editing crontab for $username"
+                cron_changes=true
+            fi
+            
+            if confirm_action "Remove ALL cronjobs for user $username?"; then
+                crontab -u "$username" -r 2>/dev/null
+                if [[ $? -eq 0 ]]; then
+                    print_success "Removed all cronjobs for $username"
+                    ((crons_removed++))
+                    cron_changes=true
+                    log_message "REMOVED ALL CRONTABS FOR USER: $username"
+                else
+                    print_error "Failed to remove crontabs for $username"
+                fi
+            fi
+        fi
+    done
+    
+    if [[ "$found_user_crons" == false ]]; then
+        print_success "No user crontabs found"
+    fi
+    
+    # 4. Check periodic cron directories
+    for cron_dir in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly; do
+        if [[ -d "$cron_dir" ]] && [[ -n "$(ls -A $cron_dir 2>/dev/null)" ]]; then
+            echo -e "\n${BOLD}Scripts in $cron_dir:${NC}"
+            ls -lh "$cron_dir"
+            
+            for script in "$cron_dir"/*; do
+                if [[ -f "$script" ]] && [[ -x "$script" ]]; then
+                    echo -e "\n${YELLOW}Script: $(basename $script)${NC}"
+                    
+                    if confirm_action "View contents of $(basename $script)?"; then
+                        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                        head -20 "$script"
+                        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                    fi
+                    
+                    if confirm_action "Delete this script: $(basename $script)?"; then
+                        if rm -f "$script" 2>/dev/null; then
+                            print_success "Deleted: $script"
+                            ((crons_removed++))
+                            cron_changes=true
+                            log_message "REMOVED CRON SCRIPT: $script"
+                        else
+                            print_error "Failed to delete: $script"
+                        fi
+                    fi
+                fi
+            done
+        fi
+    done
+    
+    # Summary
+    echo -e "\n${BOLD}Cronjob Audit Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}[i]${NC} Cronjobs/scripts removed: $crons_removed"
+    
+    if [[ "$cron_changes" == true ]]; then
+        echo -e "${GREEN}✓${NC} Cronjob audit completed with changes"
+        
+        # Restart cron service to apply changes
+        if confirm_action "Restart cron service to apply changes?"; then
+            systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null
+            print_success "Cron service restarted"
+        fi
+    else
+        echo -e "${BLUE}[i]${NC} No changes made to cronjobs"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
     print_header "MEDIA FILE REMOVAL COMPLETE"
     press_enter
 }
@@ -1738,7 +2211,117 @@ remove_prohibited_software() {
 harden_ssh() {
     print_header "SSH HARDENING"
     print_info "This module will harden SSH configuration"
-    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+    
+    local changes_made=false
+    local ssh_config="/etc/ssh/sshd_config"
+    
+    # Check if SSH is installed
+    if [[ ! -f "$ssh_config" ]]; then
+        print_warning "SSH is not installed or config file not found"
+        press_enter
+        return 1
+    fi
+    
+    # Backup config
+    cp "$ssh_config" "${ssh_config}.bak.$(date +%Y%m%d_%H%M%S)"
+    print_success "Created backup of sshd_config"
+    
+    # Helper function to set SSH config parameter
+    set_ssh_param() {
+        local param=$1
+        local value=$2
+        
+        if grep -q "^${param}" "$ssh_config"; then
+            sed -i "s/^${param}.*/${param} ${value}/" "$ssh_config"
+        elif grep -q "^#${param}" "$ssh_config"; then
+            sed -i "s/^#${param}.*/${param} ${value}/" "$ssh_config"
+        else
+            echo "${param} ${value}" >> "$ssh_config"
+        fi
+    }
+    
+    echo -e "\n${BOLD}Configuring SSH security settings...${NC}"
+    
+    if confirm_action "Apply comprehensive SSH hardening?"; then
+        # Protocol 2 only
+        set_ssh_param "Protocol" "2"
+        print_success "Set Protocol 2"
+        
+        # Change port to 2222
+        if confirm_action "Change SSH port to 2222 (non-standard port)?"; then
+            set_ssh_param "Port" "2222"
+            print_success "Set Port 2222"
+            print_warning "Remember to update firewall rules for port 2222!"
+        fi
+        
+        # Address family (IPv4 only)
+        set_ssh_param "AddressFamily" "inet"
+        print_success "Set AddressFamily inet (IPv4 only)"
+        
+        # Disable root login
+        set_ssh_param "PermitRootLogin" "no"
+        print_success "Set PermitRootLogin no"
+        
+        # Disable X11 forwarding
+        set_ssh_param "X11Forwarding" "no"
+        print_success "Set X11Forwarding no"
+        
+        # Enable PAM
+        set_ssh_param "UsePAM" "yes"
+        print_success "Set UsePAM yes"
+        
+        # Additional security settings
+        set_ssh_param "PermitEmptyPasswords" "no"
+        set_ssh_param "MaxAuthTries" "3"
+        set_ssh_param "HostbasedAuthentication" "no"
+        set_ssh_param "IgnoreRhosts" "yes"
+        set_ssh_param "PasswordAuthentication" "yes"
+        set_ssh_param "PubkeyAuthentication" "yes"
+        
+        print_success "Applied additional SSH security settings"
+        changes_made=true
+    fi
+    
+    # AllowUsers / DenyUsers configuration
+    echo -e "\n${BOLD}Configuring SSH user access...${NC}"
+    print_warning "You can restrict SSH access to specific users"
+    
+    if confirm_action "Configure AllowUsers (whitelist specific users)?"; then
+        echo -e "${CYAN}Enter usernames to allow (space-separated), or leave empty to skip:${NC}"
+        read -r allowed_users
+        
+        if [[ -n "$allowed_users" ]]; then
+            # Remove existing AllowUsers/DenyUsers lines
+            sed -i '/^AllowUsers/d' "$ssh_config"
+            sed -i '/^DenyUsers/d' "$ssh_config"
+            
+            echo "AllowUsers $allowed_users" >> "$ssh_config"
+            print_success "Set AllowUsers: $allowed_users"
+            changes_made=true
+        fi
+    fi
+    
+    # Display final config
+    echo -e "\n${BOLD}Current SSH Configuration:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    grep "^Protocol\|^Port\|^AddressFamily\|^PermitRootLogin\|^X11Forwarding\|^UsePAM\|^AllowUsers\|^DenyUsers\|^PermitEmptyPasswords\|^MaxAuthTries" "$ssh_config"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Restart SSH
+    if [[ "$changes_made" == true ]]; then
+        echo -e "\n${BOLD}Restarting SSH service...${NC}"
+        if confirm_action "Restart SSH service to apply changes?"; then
+            systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+            if [[ $? -eq 0 ]]; then
+                print_success "SSH service restarted"
+                print_warning "If you changed the port, reconnect using: ssh -p 2222 user@host"
+            else
+                print_error "Failed to restart SSH service"
+            fi
+        fi
+    fi
+    
+    print_header "SSH HARDENING COMPLETE"
     press_enter
 }
 
@@ -1748,19 +2331,348 @@ harden_ssh() {
 
 enable_security_features() {
     print_header "ENABLE SECURITY FEATURES"
-    print_info "This module will enable various security features"
-    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
-    press_enter
-}
+    print_info "This module will enable various system security features"
+    
+    local changes_made=false
+    
+    # 1. Enable ASLR (Address Space Layout Randomization)
+    echo -e "\n${BOLD}Checking ASLR (Address Space Layout Randomization)...${NC}"
+    
+    local aslr_value=$(cat /proc/sys/kernel/randomize_va_space 2>/dev/null)
+    print_info "Current ASLR value: $aslr_value (0=disabled, 1=partial, 2=full)"
+    
+    if [[ "$aslr_value" != "2" ]]; then
+        if confirm_action "Enable full ASLR (randomize_va_space=2)?"; then
+            sysctl -w kernel.randomize_va_space=2
+            
+            # Make it permanent
+            if ! grep -q "^kernel.randomize_va_space" /etc/sysctl.conf; then
+                echo "kernel.randomize_va_space=2" >> /etc/sysctl.conf
+            else
+                sed -i 's/^kernel.randomize_va_space.*/kernel.randomize_va_space=2/' /etc/sysctl.conf
+            fi
+            
+            sysctl -p
+            print_success "ASLR enabled (full randomization)"
+            changes_made=true
+        fi
+    else
+        print_success "ASLR already enabled (full randomization)"
+    fi
+    
+    # 2. Configure /etc/sysctl.conf for network security
+    echo -e "\n${BOLD}Configuring sysctl network security settings...${NC}"
+    
+    if confirm_action "Apply comprehensive sysctl security settings?"; then
+        local sysctl_conf="/etc/sysctl.conf"
+        cp "$sysctl_conf" "${sysctl_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+        print_success "Created backup of sysctl.conf"
+        
+        # Network security parameters
+        local sysctl_params=(
+            "net.ipv4.conf.all.rp_filter=1"
+            "net.ipv4.conf.default.rp_filter=1"
+            "net.ipv4.icmp_echo_ignore_broadcasts=1"
+            "net.ipv4.conf.all.accept_source_route=0"
+            "net.ipv6.conf.all.accept_source_route=0"
+            "net.ipv4.conf.default.accept_source_route=0"
+            "net.ipv6.conf.default.accept_source_route=0"
+            "net.ipv4.conf.all.send_redirects=0"
+            "net.ipv4.conf.default.send_redirects=0"
+            "net.ipv4.tcp_syncookies=1"
+            "net.ipv4.tcp_max_syn_backlog=2048"
+            "net.ipv4.tcp_synack_retries=2"
+            "net.ipv4.tcp_syn_retries=5"
+            "net.ipv4.conf.all.log_martians=1"
+            "net.ipv4.icmp_ignore_bogus_error_responses=1"
+            "net.ipv4.conf.all.accept_redirects=0"
+            "net.ipv6.conf.all.accept_redirects=0"
+            "net.ipv4.conf.default.accept_redirects=0"
+            "net.ipv6.conf.default.accept_redirects=0"
+            "net.ipv4.icmp_echo_ignore_all=1"
+            "net.ipv4.ip_forward=0"
+            "net.ipv6.conf.all.disable_ipv6=1"
+            "net.ipv6.conf.default.disable_ipv6=1"
+            "net.ipv6.conf.lo.disable_ipv6=1"
+            "net.ipv4.tcp_rfc1337=1"
+            "kernel.yama.ptrace_scope=1"
+            "kernel.pid_max=32768"
+            "fs.protected_symlinks=1"
+            "fs.protected_fifos=1"
+        )
+        
+        echo -e "\n# CyberPatriot Security Settings - $(date +%Y-%m-%d)" >> "$sysctl_conf"
+        
+        for param in "${sysctl_params[@]}"; do
+            local key="${param%%=*}"
+            local value="${param##*=}"
+            
+            # Remove existing entry if present
+            sed -i "/^${key}/d" "$sysctl_conf"
+            sed -i "/^#${key}/d" "$sysctl_conf"
+            
+            # Add new entry
+            echo "$param" >> "$sysctl_conf"
+        done
+        
+        # Apply settings
+        sysctl -p
+        print_success "Applied sysctl security settings"
+        changes_made=true
+    fi
+    
+    # 3. Install and configure Fail2Ban
+    echo -e "\n${BOLD}Configuring Fail2Ban...${NC}"
+    
+    if ! command -v fail2ban-client &>/dev/null; then
+        if confirm_action "Install Fail2Ban for intrusion prevention?"; then
+            apt install -y fail2ban
+            if [[ $? -eq 0 ]]; then
+                print_success "Fail2Ban installed"
+                changes_made=true
+            else
+                print_error "Failed to install Fail2Ban"
+            fi
+        fi
+    else
+        print_success "Fail2Ban already installed"
+    fi
+    
+    if command -v fail2ban-client &>/dev/null; then
+        if confirm_action "Configure Fail2Ban for SSH protection?"; then
+            local jail_local="/etc/fail2ban/jail.local"
+            
+            cat > "$jail_local" << 'EOF'
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 3
 
-#############################################
-# Task 11: Generate Security Report
-#############################################
-
-generate_report() {
-    print_header "SECURITY REPORT"
-    print_info "This module will generate a comprehensive security report"
-    echo -e "${YELLOW}[TO BE IMPLEMENTED]${NC}"
+[sshd]
+enabled  = true
+port     = ssh,2222
+filter   = sshd
+logpath  = /var/log/auth.log
+maxretry = 3
+EOF
+            
+            print_success "Configured Fail2Ban for SSH"
+            
+            systemctl enable fail2ban
+            systemctl restart fail2ban
+            print_success "Fail2Ban enabled and restarted"
+            changes_made=true
+        fi
+    fi
+    
+    # 7. Configure GRUB security
+    echo -e "\n${BOLD}Configuring GRUB security...${NC}"
+    
+    if [[ -f "/etc/default/grub" ]]; then
+        if confirm_action "Add security=apparmor to GRUB configuration?"; then
+            cp /etc/default/grub /etc/default/grub.bak.$(date +%Y%m%d_%H%M%S)
+            
+            if grep -q "GRUB_CMDLINE_LINUX=" /etc/default/grub; then
+                if ! grep "GRUB_CMDLINE_LINUX=" /etc/default/grub | grep -q "security=apparmor"; then
+                    sed -i 's/GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="security=apparmor /' /etc/default/grub
+                    print_success "Added security=apparmor to GRUB"
+                    
+                    update-grub
+                    print_success "GRUB configuration updated"
+                    changes_made=true
+                else
+                    print_success "security=apparmor already in GRUB configuration"
+                fi
+            fi
+        fi
+    fi
+    
+    # 8. Configure DNS (if BIND is installed)
+    if [[ -f "/etc/bind/named.conf.options" ]]; then
+        echo -e "\n${BOLD}Configuring DNS (BIND) security...${NC}"
+        
+        if confirm_action "Disable DNS recursion and hide version?"; then
+            cp /etc/bind/named.conf.options /etc/bind/named.conf.options.bak.$(date +%Y%m%d_%H%M%S)
+            
+            # Add to options section if not present
+            if ! grep -q "recursion no;" /etc/bind/named.conf.options; then
+                sed -i '/options {/a \    recursion no;' /etc/bind/named.conf.options
+                print_success "Disabled DNS recursion"
+            fi
+            
+            if ! grep -q "version" /etc/bind/named.conf.options; then
+                sed -i '/options {/a \    version "Not Disclosed";' /etc/bind/named.conf.options
+                print_success "Hidden BIND version"
+            fi
+            
+            systemctl restart bind9 2>/dev/null
+            print_success "BIND9 restarted"
+            changes_made=true
+        fi
+    fi
+    
+    # 9. Web Server Security (ask first if it should be configured or disabled)
+    echo -e "\n${BOLD}Web Server Configuration${NC}"
+    
+    local is_web_server=false
+    if confirm_action "Is this system a WEB SERVER (check README)?"; then
+        is_web_server=true
+    fi
+    
+    # Apache Configuration
+    if systemctl is-active apache2 &>/dev/null || [[ -d "/etc/apache2" ]]; then
+        if [[ "$is_web_server" == true ]]; then
+            echo -e "\n${BOLD}Hardening Apache...${NC}"
+            
+            if confirm_action "Apply Apache security hardening?"; then
+                local apache_security="/etc/apache2/conf-enabled/security.conf"
+                
+                if [[ -f "$apache_security" ]]; then
+                    cp "$apache_security" "${apache_security}.bak.$(date +%Y%m%d_%H%M%S)"
+                    
+                    # Set ServerTokens and ServerSignature
+                    sed -i 's/^ServerTokens.*/ServerTokens Prod/' "$apache_security"
+                    sed -i 's/^ServerSignature.*/ServerSignature Off/' "$apache_security"
+                    
+                    print_success "Configured Apache security settings"
+                    
+                    systemctl restart apache2
+                    print_success "Apache restarted"
+                    changes_made=true
+                else
+                    print_warning "Apache security.conf not found"
+                fi
+            fi
+            
+            # WordPress configuration
+            if [[ -f "/var/www/html/wp-config.php" ]]; then
+                if confirm_action "Disable WordPress debugging?"; then
+                    sed -i "s/define('WP_DEBUG', true);/define('WP_DEBUG', false);/" /var/www/html/wp-config.php
+                    sed -i "s/define( 'WP_DEBUG', true );/define('WP_DEBUG', false);/" /var/www/html/wp-config.php
+                    print_success "Disabled WordPress debugging"
+                    changes_made=true
+                fi
+            fi
+        else
+            print_warning "System is NOT a web server - Apache should be disabled"
+            print_info "Use 'Audit Services' menu option to disable Apache"
+        fi
+    fi
+    
+    # Nginx Configuration
+    if systemctl is-active nginx &>/dev/null || [[ -d "/etc/nginx" ]]; then
+        if [[ "$is_web_server" == true ]]; then
+            echo -e "\n${BOLD}Hardening Nginx...${NC}"
+            
+            if confirm_action "Apply Nginx security hardening?"; then
+                local nginx_conf="/etc/nginx/nginx.conf"
+                
+                if [[ -f "$nginx_conf" ]]; then
+                    cp "$nginx_conf" "${nginx_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+                    
+                    # Add server_tokens off if not present
+                    if ! grep -q "server_tokens off;" "$nginx_conf"; then
+                        sed -i '/http {/a \    server_tokens off;' "$nginx_conf"
+                        print_success "Configured Nginx to hide version"
+                        
+                        systemctl restart nginx
+                        print_success "Nginx restarted"
+                        changes_made=true
+                    else
+                        print_success "Nginx already configured"
+                    fi
+                else
+                    print_warning "Nginx configuration not found"
+                fi
+            fi
+        else
+            print_warning "System is NOT a web server - Nginx should be disabled"
+            print_info "Use 'Audit Services' menu option to disable Nginx"
+        fi
+    fi
+    
+    # Squid Configuration
+    if systemctl is-active squid &>/dev/null || [[ -f "/etc/squid/squid.conf" ]]; then
+        if [[ "$is_web_server" == true ]]; then
+            echo -e "\n${BOLD}Hardening Squid...${NC}"
+            
+            if confirm_action "Apply Squid security hardening?"; then
+                local squid_conf="/etc/squid/squid.conf"
+                
+                if [[ -f "$squid_conf" ]]; then
+                    cp "$squid_conf" "${squid_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+                    
+                    # Add security settings if not present
+                    if ! grep -q "forwarded_for off" "$squid_conf"; then
+                        echo "forwarded_for off" >> "$squid_conf"
+                    fi
+                    if ! grep -q "via off" "$squid_conf"; then
+                        echo "via off" >> "$squid_conf"
+                    fi
+                    if ! grep -q "httpd_suppress_version_string on" "$squid_conf"; then
+                        echo "httpd_suppress_version_string on" >> "$squid_conf"
+                    fi
+                    
+                    print_success "Configured Squid security settings"
+                    
+                    systemctl restart squid
+                    print_success "Squid restarted"
+                    changes_made=true
+                else
+                    print_warning "Squid configuration not found"
+                fi
+            fi
+        else
+            print_warning "System is NOT a web server - Squid should be disabled"
+            print_info "Use 'Audit Services' menu option to disable Squid"
+        fi
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}Security Features Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    local aslr_current=$(cat /proc/sys/kernel/randomize_va_space 2>/dev/null)
+    if [[ "$aslr_current" == "2" ]]; then
+        echo -e "${GREEN}✓${NC} ASLR: Enabled (full)"
+    else
+        echo -e "${YELLOW}!${NC} ASLR: $aslr_current"
+    fi
+    
+    if grep -q "^net.ipv4.tcp_syncookies=1" /etc/sysctl.conf; then
+        echo -e "${GREEN}✓${NC} Network hardening: Configured"
+    else
+        echo -e "${YELLOW}!${NC} Network hardening: Not configured"
+    fi
+    
+    if systemctl is-active apparmor &>/dev/null; then
+        echo -e "${GREEN}✓${NC} AppArmor: Active"
+    else
+        echo -e "${YELLOW}!${NC} AppArmor: Inactive"
+    fi
+    
+    if systemctl is-active rsyslog &>/dev/null; then
+        echo -e "${GREEN}✓${NC} rsyslog: Active"
+    else
+        echo -e "${YELLOW}!${NC} rsyslog: Inactive"
+    fi
+    
+    if systemctl is-active fail2ban &>/dev/null; then
+        echo -e "${GREEN}✓${NC} Fail2Ban: Active"
+    else
+        echo -e "${YELLOW}!${NC} Fail2Ban: Not active"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "Security features enabled successfully"
+        print_warning "Some changes require a reboot to take full effect"
+    else
+        print_info "No changes were made"
+    fi
+    
+    print_header "SECURITY FEATURES CONFIGURATION COMPLETE"
     press_enter
 }
 
@@ -1780,7 +2692,6 @@ show_menu() {
     echo -e "${GREEN} 8)${NC} Remove Prohibited Software"
     echo -e "${GREEN} 9)${NC} Harden SSH Configuration"
     echo -e "${GREEN}10)${NC} Enable Security Features"
-    echo -e "${GREEN}11)${NC} Generate Security Report"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -1810,7 +2721,6 @@ main() {
             8) remove_prohibited_software ;;
             9) harden_ssh ;;
             10) enable_security_features ;;
-            11) generate_report ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
