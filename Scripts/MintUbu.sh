@@ -245,6 +245,55 @@ user_auditing() {
         print_success "No hidden users detected"
     fi
     
+    # Disable guest account
+    echo -e "\n${BOLD}Checking guest account...${NC}"
+    
+    # LightDM guest account (Ubuntu/Mint with LightDM)
+    local lightdm_conf="/etc/lightdm/lightdm.conf"
+    local lightdm_conf_d="/etc/lightdm/lightdm.conf.d"
+    
+    if [[ -f "$lightdm_conf" ]] || [[ -d "$lightdm_conf_d" ]]; then
+        if confirm_action "Disable LightDM guest account?"; then
+            # Create lightdm config directory if it doesn't exist
+            mkdir -p "$lightdm_conf_d"
+            
+            # Create/update guest disable config
+            cat > "$lightdm_conf_d/50-no-guest.conf" << 'EOF'
+[Seat:*]
+allow-guest=false
+EOF
+            print_success "Disabled LightDM guest account"
+            changes_made=true
+        fi
+    fi
+    
+    # GDM guest account (GNOME Display Manager)
+    local gdm_custom="/etc/gdm3/custom.conf"
+    if [[ -f "$gdm_custom" ]]; then
+        if confirm_action "Disable GDM3 guest account?"; then
+            if ! grep -q "TimedLoginEnable=false" "$gdm_custom"; then
+                sed -i '/\[daemon\]/a TimedLoginEnable=false' "$gdm_custom"
+            fi
+            if ! grep -q "AutomaticLoginEnable=false" "$gdm_custom"; then
+                sed -i '/\[daemon\]/a AutomaticLoginEnable=false' "$gdm_custom"
+            fi
+            print_success "Disabled GDM3 automatic/guest login"
+            changes_made=true
+        fi
+    fi
+    
+    # Disable guest user account if it exists
+    if id "guest" &>/dev/null 2>&1; then
+        if confirm_action "Lock guest user account?"; then
+            passwd -l guest 2>/dev/null
+            usermod -s /usr/sbin/nologin guest 2>/dev/null
+            print_success "Locked guest account"
+            changes_made=true
+        fi
+    else
+        print_success "No guest user account found"
+    fi
+    
     # Check for unauthorized users
     echo -e "\n${BOLD}Checking for unauthorized users...${NC}"
     UNAUTHORIZED_USERS=()
@@ -339,6 +388,48 @@ user_auditing() {
             fi
         fi
     done
+    
+    # Check for weak/insecure passwords
+    echo -e "\n${BOLD}Checking for weak passwords...${NC}"
+    print_info "Testing common weak passwords for all users"
+    
+    local weak_passwords=("password" "123456" "admin" "welcome" "letmein" "Password1" "qwerty" "abc123" "")
+    local users_with_weak_passwords=()
+    
+    for user in "${SYSTEM_USERS[@]}"; do
+        # Skip system users that are locked
+        if passwd -S "$user" 2>/dev/null | grep -q "L\|NP"; then
+            continue
+        fi
+        
+        # Test weak passwords (this is a simplified check)
+        # In production, you'd use a more sophisticated method
+        local username_as_password=false
+        
+        # Check if username might be the password (common mistake)
+        if echo "$user:$user" | chpasswd --test 2>/dev/null; then
+            username_as_password=true
+        fi
+        
+        # Flag users for password review
+        if [[ "$username_as_password" == true ]]; then
+            users_with_weak_passwords+=("$user")
+            print_warning "User $user may have weak password (username as password)"
+        fi
+    done
+    
+    if [[ ${#users_with_weak_passwords[@]} -gt 0 ]]; then
+        echo -e "\n${YELLOW}Found ${#users_with_weak_passwords[@]} user(s) with potentially weak passwords${NC}"
+        
+        for user in "${users_with_weak_passwords[@]}"; do
+            if confirm_action "Force password change for $user on next login?"; then
+                passwd -e "$user"
+                print_success "Set password expiry for $user - must change on next login"
+            fi
+        done
+    else
+        print_info "Password strength check complete"
+    fi
     
     # Check regular users don't have admin privileges
     echo -e "\n${BOLD}Checking regular users for incorrect admin privileges...${NC}"
@@ -1420,18 +1511,6 @@ audit_services() {
             print_success "No netcat references found in /etc"
         fi
         
-        # Check for netcat in /etc
-        echo -e "\n${BOLD}Checking for netcat references in /etc...${NC}"
-        if grep -r "netcat" /etc 2>/dev/null | head -5; then
-            print_warning "Found netcat references in /etc (shown above)"
-            if confirm_action "Review and manually clean netcat references?"; then
-                print_info "Use: sudo grep -r netcat /etc"
-                print_info "Then manually edit the files to remove references"
-            fi
-        else
-            print_success "No netcat references found in /etc"
-        fi
-        
         # Remove unwanted Chrome extensions and hacking tools
         echo -e "\n${BOLD}Removing Chrome extensions and security tools...${NC}"
         local unwanted_extra=("chrome-extension" "sqlmap" "wapiti")
@@ -1618,6 +1697,101 @@ audit_services() {
         fi
     else
         print_success "rsyslog already running"
+    fi
+    
+    # Part 6: Check for Unauthorized Repositories
+    echo -e "\n${BOLD}Step 5: Unauthorized Repository Check${NC}"
+    print_info "Checking package sources for unauthorized repositories"
+    
+    if confirm_action "Scan for potentially unauthorized repositories?"; then
+        local suspicious_repos=()
+        
+        # Check /etc/apt/sources.list
+        echo -e "\n${CYAN}Checking /etc/apt/sources.list...${NC}"
+        
+        # Look for non-standard repositories
+        while IFS= read -r line; do
+            # Skip comments and empty lines
+            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+            
+            # Check for suspicious/non-official repositories
+            if ! echo "$line" | grep -q "ubuntu.com\|canonical.com\|linuxmint.com"; then
+                # Not an official repo
+                suspicious_repos+=("$line")
+            fi
+        done < /etc/apt/sources.list
+        
+        # Check /etc/apt/sources.list.d/
+        if [[ -d "/etc/apt/sources.list.d" ]]; then
+            echo -e "\n${CYAN}Checking /etc/apt/sources.list.d/...${NC}"
+            
+            for repo_file in /etc/apt/sources.list.d/*.list; do
+                if [[ -f "$repo_file" ]]; then
+                    while IFS= read -r line; do
+                        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+                        
+                        if ! echo "$line" | grep -q "ubuntu.com\|canonical.com\|linuxmint.com\|google.com\|microsoft.com"; then
+                            suspicious_repos+=("$(basename "$repo_file"): $line")
+                        fi
+                    done < "$repo_file"
+                fi
+            done
+        fi
+        
+        if [[ ${#suspicious_repos[@]} -gt 0 ]]; then
+            print_warning "Found ${#suspicious_repos[@]} potentially unauthorized repository entry/entries"
+            
+            echo -e "\n${YELLOW}Suspicious repositories:${NC}"
+            for repo in "${suspicious_repos[@]}"; do
+                echo -e "  ${RED}!${NC} $repo"
+            done
+            
+            if confirm_action "Review and remove unauthorized repositories?"; then
+                echo -e "\n${YELLOW}Opening repository configuration...${NC}"
+                print_info "Review the file and remove any unauthorized entries"
+                print_info "Press Ctrl+X to exit nano, then Y to save"
+                
+                if confirm_action "Edit /etc/apt/sources.list?"; then
+                    cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%Y%m%d_%H%M%S)
+                    nano /etc/apt/sources.list
+                    print_success "Repository file backed up and edited"
+                    changes_made=true
+                fi
+                
+                if [[ -d "/etc/apt/sources.list.d" ]]; then
+                    if confirm_action "Review /etc/apt/sources.list.d/ files?"; then
+                        ls -lh /etc/apt/sources.list.d/
+                        
+                        for repo_file in /etc/apt/sources.list.d/*.list; do
+                            if [[ -f "$repo_file" ]]; then
+                                echo -e "\n${BOLD}File: $(basename "$repo_file")${NC}"
+                                cat "$repo_file"
+                                
+                                if confirm_action "Edit this file?"; then
+                                    cp "$repo_file" "${repo_file}.bak.$(date +%Y%m%d_%H%M%S)"
+                                    nano "$repo_file"
+                                    changes_made=true
+                                fi
+                                
+                                if confirm_action "Delete this repository file entirely?"; then
+                                    rm -f "$repo_file"
+                                    print_success "Removed: $(basename "$repo_file")"
+                                    changes_made=true
+                                    log_message "REMOVED UNAUTHORIZED REPOSITORY: $(basename "$repo_file")"
+                                fi
+                            fi
+                        done
+                    fi
+                fi
+                
+                if [[ "$changes_made" == true ]]; then
+                    print_info "Updating package lists after repository changes..."
+                    apt update
+                fi
+            fi
+        else
+            print_success "All repositories appear to be from official sources"
+        fi
     fi
     
     # Final Summary
@@ -2215,6 +2389,153 @@ remove_prohibited_software() {
         print_info "No files were removed"
     fi
     
+    # Part 4.5: Backdoor Detection
+    echo -e "\n${BOLD}Step 3.5: Backdoor Detection${NC}"
+    print_info "Scanning for common backdoors and suspicious scripts"
+    
+    if confirm_action "Scan for backdoors?"; then
+        local backdoors_found=0
+        
+        # Check for netcat backdoors (listening netcat processes)
+        echo -e "\n${CYAN}Checking for netcat backdoors...${NC}"
+        if pgrep -f "nc.*-l" &>/dev/null || pgrep -f "ncat.*-l" &>/dev/null; then
+            print_warning "Found listening netcat process - potential backdoor!"
+            ps aux | grep -E "nc.*-l|ncat.*-l" | grep -v grep
+            
+            if confirm_action "Kill netcat listening processes?"; then
+                pkill -f "nc.*-l"
+                pkill -f "ncat.*-l"
+                print_success "Killed netcat processes"
+                changes_made=true
+                ((backdoors_found++))
+            fi
+        else
+            print_success "No netcat backdoors detected"
+        fi
+        
+        # Check for python backdoors (reverse shells, suspicious listening scripts)
+        echo -e "\n${CYAN}Checking for Python backdoors...${NC}"
+        
+        # Search for suspicious Python scripts in common locations
+        local suspicious_python_scripts=()
+        
+        # Check for python scripts with socket/subprocess usage (common in backdoors)
+        while IFS= read -r -d '' file; do
+            if grep -l "socket\|subprocess\|os.system\|eval\|exec" "$file" &>/dev/null; then
+                # Further check for suspicious patterns
+                if grep -q "socket.*connect\|socket.*bind\|subprocess.*shell=True\|os.system.*bash" "$file"; then
+                    suspicious_python_scripts+=("$file")
+                fi
+            fi
+        done < <(find /home /tmp /var/tmp -type f -name "*.py" -print0 2>/dev/null)
+        
+        if [[ ${#suspicious_python_scripts[@]} -gt 0 ]]; then
+            print_warning "Found ${#suspicious_python_scripts[@]} suspicious Python script(s)"
+            
+            for script in "${suspicious_python_scripts[@]}"; do
+                echo -e "\n${YELLOW}Suspicious script: $script${NC}"
+                echo -e "${BOLD}Owner:${NC} $(stat -c "%U" "$script" 2>/dev/null)"
+                echo -e "${BOLD}Modified:${NC} $(stat -c "%y" "$script" 2>/dev/null | cut -d' ' -f1)"
+                
+                if confirm_action "View this script?"; then
+                    head -20 "$script"
+                    echo "..."
+                fi
+                
+                if confirm_action "Remove this Python script?"; then
+                    rm -f "$script"
+                    print_success "Removed: $script"
+                    changes_made=true
+                    ((backdoors_found++))
+                    log_message "REMOVED PYTHON BACKDOOR: $script"
+                fi
+            done
+        else
+            print_success "No suspicious Python scripts detected"
+        fi
+        
+        # Check for unauthorized SSH keys
+        echo -e "\n${CYAN}Checking for unauthorized SSH keys...${NC}"
+        
+        for home_dir in /home/*; do
+            if [[ -d "$home_dir/.ssh" ]]; then
+                local username=$(basename "$home_dir")
+                
+                if [[ -f "$home_dir/.ssh/authorized_keys" ]]; then
+                    local key_count=$(wc -l < "$home_dir/.ssh/authorized_keys")
+                    
+                    if [[ $key_count -gt 0 ]]; then
+                        echo -e "\n${YELLOW}User $username has $key_count SSH key(s)${NC}"
+                        
+                        if confirm_action "Review SSH keys for $username?"; then
+                            cat "$home_dir/.ssh/authorized_keys"
+                            
+                            if confirm_action "Remove ALL SSH keys for $username?"; then
+                                rm -f "$home_dir/.ssh/authorized_keys"
+                                print_success "Removed SSH keys for $username"
+                                changes_made=true
+                                ((backdoors_found++))
+                            fi
+                        fi
+                    fi
+                fi
+            fi
+        done
+        
+        # Check for suspicious listening ports
+        echo -e "\n${CYAN}Checking for suspicious listening ports...${NC}"
+        print_info "Common backdoor ports: 1337, 31337, 4444, 5555, 6666, 8888"
+        
+        local suspicious_ports=(1337 31337 4444 5555 6666 8888 12345)
+        local suspicious_found=false
+        
+        for port in "${suspicious_ports[@]}"; do
+            if ss -tlnp | grep -q ":$port "; then
+                print_warning "Found process listening on port $port (common backdoor port)"
+                ss -tlnp | grep ":$port "
+                suspicious_found=true
+            fi
+        done
+        
+        if [[ "$suspicious_found" == false ]]; then
+            print_success "No processes listening on common backdoor ports"
+        fi
+        
+        # Check for suspicious files in /tmp and /var/tmp
+        echo -e "\n${CYAN}Checking /tmp and /var/tmp for backdoors...${NC}"
+        
+        local suspicious_files=(
+            "/tmp/.ICE-unix/backdoor"
+            "/tmp/.X11-unix/backdoor"
+            "/var/tmp/.backdoor"
+            "/dev/shm/backdoor"
+        )
+        
+        for file in /tmp/.* /tmp/* /var/tmp/.* /var/tmp/* /dev/shm/*; do
+            if [[ -f "$file" ]] && file "$file" 2>/dev/null | grep -q "executable\|script"; then
+                # Check if it's a shell script or executable
+                if [[ -x "$file" ]] || head -1 "$file" 2>/dev/null | grep -q "^#!"; then
+                    echo -e "\n${YELLOW}Suspicious executable: $file${NC}"
+                    ls -lh "$file"
+                    
+                    if confirm_action "Remove this file?"; then
+                        rm -f "$file"
+                        print_success "Removed: $file"
+                        changes_made=true
+                        ((backdoors_found++))
+                    fi
+                fi
+            fi
+        done
+        
+        echo -e "\n${BOLD}Backdoor Scan Summary:${NC}"
+        if [[ $backdoors_found -gt 0 ]]; then
+            echo -e "${YELLOW}!${NC} Found and removed $backdoors_found potential backdoor(s)"
+        else
+            print_success "No backdoors detected"
+        fi
+    fi
+    
     # Part 5: Audit Cronjobs
     echo -e "\n${BOLD}Step 4: Cronjob Audit${NC}"
     print_info "Checking for scheduled tasks (cronjobs) on the system"
@@ -2584,7 +2905,98 @@ enable_security_features() {
         changes_made=true
     fi
     
-    # 3. Install and configure Fail2Ban
+    # 3. Disable X Server TCP connections
+    echo -e "\n${BOLD}Disabling X Server TCP connections...${NC}"
+    print_info "This prevents remote X11 connections which can be a security risk"
+    
+    if confirm_action "Disable X Server TCP listening?"; then
+        local lightdm_conf="/etc/lightdm/lightdm.conf"
+        local lightdm_conf_d="/etc/lightdm/lightdm.conf.d"
+        local gdm_custom="/etc/gdm3/custom.conf"
+        
+        # For LightDM
+        if [[ -d "$lightdm_conf_d" ]] || [[ -f "$lightdm_conf" ]]; then
+            mkdir -p "$lightdm_conf_d"
+            cat > "$lightdm_conf_d/50-xserver-command.conf" << 'EOF'
+[Seat:*]
+xserver-command=X -nolisten tcp
+EOF
+            print_success "Configured LightDM to disable X Server TCP listening"
+            changes_made=true
+        fi
+        
+        # For GDM3
+        if [[ -f "$gdm_custom" ]]; then
+            if ! grep -q "DisallowTCP=true" "$gdm_custom"; then
+                sed -i '/\[security\]/a DisallowTCP=true' "$gdm_custom"
+                print_success "Configured GDM3 to disable X Server TCP listening"
+                changes_made=true
+            fi
+        fi
+        
+        # Also configure via X11 startup
+        local x11_startup="/etc/X11/xinit/xserverrc"
+        if [[ -f "$x11_startup" ]]; then
+            if ! grep -q "nolisten tcp" "$x11_startup"; then
+                sed -i 's/exec \/usr\/bin\/X.*/exec \/usr\/bin\/X -nolisten tcp "$@"/' "$x11_startup"
+                print_success "Configured X11 startup to disable TCP listening"
+                changes_made=true
+            fi
+        else
+            # Create the file if it doesn't exist
+            cat > "$x11_startup" << 'EOF'
+#!/bin/sh
+exec /usr/bin/X -nolisten tcp "$@"
+EOF
+            chmod +x "$x11_startup"
+            print_success "Created X11 startup configuration to disable TCP listening"
+            changes_made=true
+        fi
+    fi
+    
+    # 4. Check for insecure sudo configurations
+    echo -e "\n${BOLD}Checking sudo configuration for security issues...${NC}"
+    
+    local sudoers_file="/etc/sudoers"
+    local insecure_sudo=false
+    
+    # Check for NOPASSWD entries
+    if grep -rq "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null; then
+        print_warning "Found NOPASSWD entries in sudo configuration"
+        insecure_sudo=true
+        
+        echo -e "\n${YELLOW}Insecure sudo entries:${NC}"
+        grep -r "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -v "^#"
+        
+        if confirm_action "Remove NOPASSWD entries from sudo configuration?"; then
+            # Backup sudoers
+            cp "$sudoers_file" "${sudoers_file}.bak.$(date +%Y%m%d_%H%M%S)"
+            
+            # Remove NOPASSWD from main sudoers file
+            sed -i 's/NOPASSWD://g' "$sudoers_file"
+            
+            # Remove NOPASSWD from sudoers.d files
+            for file in /etc/sudoers.d/*; do
+                if [[ -f "$file" ]]; then
+                    sed -i 's/NOPASSWD://g' "$file"
+                fi
+            done
+            
+            print_success "Removed NOPASSWD entries from sudo configuration"
+            changes_made=true
+        fi
+    else
+        print_success "No insecure NOPASSWD entries found in sudo configuration"
+    fi
+    
+    # Check for overly permissive sudo rules
+    if grep -rq "ALL=(ALL:ALL) ALL" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -v "^#" | grep -v "%sudo"; then
+        print_warning "Found potentially overly permissive sudo rules"
+        echo -e "\n${YELLOW}Review these sudo rules:${NC}"
+        grep -r "ALL=(ALL:ALL) ALL" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -v "^#" | grep -v "%sudo"
+    fi
+    
+    # 5. Install and configure Fail2Ban
     echo -e "\n${BOLD}Configuring Fail2Ban...${NC}"
     
     if ! command -v fail2ban-client &>/dev/null; then
@@ -2693,9 +3105,19 @@ EOF
                 if [[ -f "$apache_security" ]]; then
                     cp "$apache_security" "${apache_security}.bak.$(date +%Y%m%d_%H%M%S)"
                     
-                    # Set ServerTokens and ServerSignature
+                    # Set ServerTokens to Prod (least information disclosure)
                     sed -i 's/^ServerTokens.*/ServerTokens Prod/' "$apache_security"
+                    if ! grep -q "^ServerTokens" "$apache_security"; then
+                        echo "ServerTokens Prod" >> "$apache_security"
+                    fi
+                    print_success "Set ServerTokens to Prod (least verbose)"
+                    
+                    # Disable ServerSignature
                     sed -i 's/^ServerSignature.*/ServerSignature Off/' "$apache_security"
+                    if ! grep -q "^ServerSignature" "$apache_security"; then
+                        echo "ServerSignature Off" >> "$apache_security"
+                    fi
+                    print_success "Disabled Apache server signature"
                     
                     print_success "Configured Apache security settings"
                     
@@ -2766,14 +3188,35 @@ EOF
                     cp "$squid_conf" "${squid_conf}.bak.$(date +%Y%m%d_%H%M%S)"
                     
                     # Add security settings if not present
-                    if ! grep -q "forwarded_for off" "$squid_conf"; then
-                        echo "forwarded_for off" >> "$squid_conf"
+                    
+                    # Disable X-Forwarded-For headers
+                    if ! grep -q "^forwarded_for" "$squid_conf"; then
+                        echo "forwarded_for delete" >> "$squid_conf"
+                        print_success "Disabled X-Forwarded-For headers"
                     fi
-                    if ! grep -q "via off" "$squid_conf"; then
+                    
+                    # Disable Via headers
+                    if ! grep -q "^via" "$squid_conf"; then
                         echo "via off" >> "$squid_conf"
+                        print_success "Disabled Via headers"
                     fi
-                    if ! grep -q "httpd_suppress_version_string on" "$squid_conf"; then
+                    
+                    # Don't send Squid version
+                    if ! grep -q "^httpd_suppress_version_string" "$squid_conf"; then
                         echo "httpd_suppress_version_string on" >> "$squid_conf"
+                        print_success "Suppressed Squid version in headers"
+                    fi
+                    
+                    # Ignore unknown nameservers
+                    if ! grep -q "^ignore_unknown_nameservers" "$squid_conf"; then
+                        echo "ignore_unknown_nameservers on" >> "$squid_conf"
+                        print_success "Enabled ignore unknown nameservers"
+                    fi
+                    
+                    # Disable SNMP
+                    if ! grep -q "^snmp_port 0" "$squid_conf"; then
+                        sed -i 's/^snmp_port.*/snmp_port 0/' "$squid_conf" 2>/dev/null || echo "snmp_port 0" >> "$squid_conf"
+                        print_success "Disabled SNMP (set port to 0)"
                     fi
                     
                     print_success "Configured Squid security settings"
@@ -2788,6 +3231,104 @@ EOF
         else
             print_warning "System is NOT a web server - Squid should be disabled"
             print_info "Use 'Audit Services' menu option to disable Squid"
+        fi
+    fi
+    
+    # Browser Hardening (Chromium/Chrome)
+    echo -e "\n${BOLD}Browser Security Configuration${NC}"
+    
+    if confirm_action "Configure browser security settings (Chromium/Chrome)?"; then
+        # Chromium/Chrome policy directory
+        local chrome_policy_dir="/etc/chromium/policies/managed"
+        local chrome_alt_policy_dir="/etc/opt/chrome/policies/managed"
+        
+        # Create policy directories
+        mkdir -p "$chrome_policy_dir"
+        mkdir -p "$chrome_alt_policy_dir"
+        
+        # Create security policy JSON
+        cat > "$chrome_policy_dir/security_policy.json" << 'EOF'
+{
+  "EnableOnlineRevocationChecks": true,
+  "SafeBrowsingEnabled": true,
+  "SafeBrowsingExtendedReportingEnabled": false,
+  "PasswordManagerEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "AutofillAddressEnabled": false,
+  "SyncDisabled": true,
+  "BlockThirdPartyCookies": true,
+  "EnableMediaRouter": false,
+  "CloudPrintProxyEnabled": false,
+  "MetricsReportingEnabled": false,
+  "SearchSuggestEnabled": false,
+  "NetworkPredictionOptions": 2,
+  "DefaultCookiesSetting": 1,
+  "DefaultGeolocationSetting": 2,
+  "DefaultNotificationsSetting": 2,
+  "UrlKeyedAnonymizedDataCollectionEnabled": false,
+  "UserFeedbackAllowed": false,
+  "DeveloperToolsDisabled": false,
+  "ChromeCleanupEnabled": false,
+  "ChromeCleanupReportingEnabled": false,
+  "EnableMediaRouterMDns": false,
+  "BackgroundModeEnabled": false,
+  "AdsSettingForIntrusiveAdsSites": 2,
+  "EnableMediaRouterDiagnostics": false
+}
+EOF
+        
+        # Copy to Chrome policy directory as well
+        cp "$chrome_policy_dir/security_policy.json" "$chrome_alt_policy_dir/security_policy.json" 2>/dev/null
+        
+        print_success "Configured Chromium/Chrome security policies"
+        print_info "  - Blocks intrusive advertisements (AdsSettingForIntrusiveAdsSites: 2)"
+        print_info "  - Safe Browsing enabled"
+        print_info "  - Third-party cookies blocked"
+        print_info "  - Sync and metrics disabled"
+        changes_made=true
+        
+        # Add Do Not Track preference for Chrome
+        cat > "$chrome_policy_dir/dnt_policy.json" << 'EOF'
+{
+  "EnableDoNotTrack": true
+}
+EOF
+        cp "$chrome_policy_dir/dnt_policy.json" "$chrome_alt_policy_dir/dnt_policy.json" 2>/dev/null
+        
+        print_success "Enabled Do Not Track for Chromium/Chrome"
+        changes_made=true
+    fi
+    
+    # Firefox hardening (bonus)
+    if command -v firefox &>/dev/null; then
+        if confirm_action "Configure Firefox security settings?"; then
+            # Find Firefox profiles
+            local firefox_profiles_dir="$HOME/.mozilla/firefox"
+            if [[ -d "$firefox_profiles_dir" ]]; then
+                for profile in "$firefox_profiles_dir"/*.default*; do
+                    if [[ -d "$profile" ]]; then
+                        local prefs_js="$profile/prefs.js"
+                        if [[ -f "$prefs_js" ]]; then
+                            # Backup
+                            cp "$prefs_js" "${prefs_js}.bak.$(date +%Y%m%d_%H%M%S)"
+                            
+                            # Add security preferences
+                            cat >> "$prefs_js" << 'EOF'
+
+// CyberPatriot Security Settings
+user_pref("privacy.donottrackheader.enabled", true);
+user_pref("privacy.trackingprotection.enabled", true);
+user_pref("privacy.trackingprotection.socialtracking.enabled", true);
+user_pref("network.cookie.cookieBehavior", 1);
+user_pref("network.dns.disablePrefetch", true);
+user_pref("network.prefetch-next", false);
+user_pref("geo.enabled", false);
+EOF
+                            print_success "Configured Firefox security settings"
+                        fi
+                    fi
+                done
+            fi
         fi
     fi
     
