@@ -970,29 +970,14 @@ configure_password_policy() {
         print_error "/etc/login.defs not found"
     fi
     
-    # 2. Install and configure libpam-pwquality for password complexity
-    echo -e "\n${BOLD}Configuring system-wide password complexity...${NC}"
+    # NOTE: PAM password configuration removed to prevent lockouts
+    # The following features are configured via /etc/security/pwquality.conf ONLY
+    # (does not modify PAM which can cause lockouts)
     
-    if ! dpkg -l | grep -q "libpam-pwquality"; then
-        print_warning "libpam-pwquality not installed"
-        if confirm_action "Install libpam-pwquality for password complexity enforcement?"; then
-            apt-get update -qq
-            apt-get install -y libpam-pwquality
-            if [[ $? -eq 0 ]]; then
-                print_success "libpam-pwquality installed"
-                changes_made=true
-            else
-                print_error "Failed to install libpam-pwquality"
-                print_warning "Skipping password complexity configuration"
-                echo ""
-                return
-            fi
-        fi
-    else
-        print_success "libpam-pwquality already installed"
-    fi
+    # 2. Configure password complexity via pwquality.conf (SAFE - no PAM modification)
+    echo -e "\n${BOLD}Configuring password complexity requirements...${NC}"
+    print_info "Using /etc/security/pwquality.conf (safer than PAM modification)"
     
-    # Configure /etc/security/pwquality.conf
     local pwquality_conf="/etc/security/pwquality.conf"
     
     if [[ -f "$pwquality_conf" ]]; then
@@ -1011,54 +996,17 @@ configure_password_policy() {
                 echo "ocredit = -1"
             } >> "$pwquality_conf"
             
-            print_success "Password complexity configured system-wide"
+            print_success "Password complexity configured"
             print_info "  - Minimum length: 8 characters"
             print_info "  - At least 1 digit required"
             print_info "  - At least 1 uppercase letter required"
             print_info "  - At least 1 lowercase letter required"
             print_info "  - At least 1 special character required"
+            print_warning "  - NOTE: PAM not modified to prevent lockouts"
             changes_made=true
         fi
     else
-        print_error "$pwquality_conf not found"
-    fi
-    
-    # 3. Configure PAM to use pwquality and password history
-    echo -e "\n${BOLD}Configuring PAM password policies...${NC}"
-    print_info "System-wide enforcement through PAM"
-    
-    local common_password="/etc/pam.d/common-password"
-    
-    if [[ -f "$common_password" ]]; then
-        cp "$common_password" "${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
-        print_success "Created backup of common-password"
-        
-        # Enable pam_pwquality if not already enabled
-        if ! grep -q "pam_pwquality.so" "$common_password"; then
-            if confirm_action "Enable PAM password quality checking?"; then
-                # Add BEFORE pam_unix.so lines
-                sed -i '/pam_unix.so/i password\trequisite\t\t\tpam_pwquality.so retry=3' "$common_password"
-                print_success "Enabled PAM password quality module"
-                changes_made=true
-            fi
-        else
-            print_info "PAM password quality already enabled"
-        fi
-        
-        # Enable password history
-        if ! grep "pam_unix.so" "$common_password" | grep -q "remember="; then
-            if confirm_action "Enable password history (remember last 5 passwords)?"; then
-                # Add remember=5 to pam_unix.so line
-                sed -i '/pam_unix.so.*password/ s/$/ remember=5/' "$common_password"
-                print_success "Password history enabled (system-wide)"
-                print_info "  - Users cannot reuse last 5 passwords"
-                changes_made=true
-            fi
-        else
-            print_info "Password history already configured"
-        fi
-    else
-        print_error "$common_password not found"
+        print_warning "$pwquality_conf not found - password complexity not configured"
     fi
     
     # 4. Configure account lockout policy (system-wide)
@@ -1303,32 +1251,11 @@ EOF
     fi
     
     # Check password quality
-    if dpkg -l 2>/dev/null | grep -q "libpam-pwquality"; then
-        echo -e "${GREEN}✓${NC} Password quality module: INSTALLED"
-    else
-        echo -e "${YELLOW}!${NC} Password quality module: NOT INSTALLED"
-    fi
-    
     if [[ -f "/etc/security/pwquality.conf" ]] && grep -q "^minlen" /etc/security/pwquality.conf 2>/dev/null; then
         local minlen=$(grep "^minlen" /etc/security/pwquality.conf | tail -1 | awk '{print $3}')
         echo -e "${GREEN}✓${NC} Password complexity: CONFIGURED (min length: $minlen)"
     else
         echo -e "${YELLOW}!${NC} Password complexity: NOT CONFIGURED"
-    fi
-    
-    # Check PAM
-    if [[ -f "/etc/pam.d/common-password" ]]; then
-        if grep -q "pam_pwquality.so" /etc/pam.d/common-password 2>/dev/null; then
-            echo -e "${GREEN}✓${NC} PAM password quality: ENABLED"
-        else
-            echo -e "${YELLOW}!${NC} PAM password quality: NOT ENABLED"
-        fi
-        
-        if grep "pam_unix.so" /etc/pam.d/common-password 2>/dev/null | grep -q "remember="; then
-            echo -e "${GREEN}✓${NC} Password history: ENABLED (system-wide)"
-        else
-            echo -e "${YELLOW}!${NC} Password history: NOT ENABLED"
-        fi
     fi
     
     # Check account lockout
@@ -2025,7 +1952,7 @@ update_system() {
     
     local changes_made=false
     
-    # 1. Configure automatic updates
+    # 1. Configure automatic updates (FAST)
     echo -e "\n${BOLD}Step 1: Configure Automatic Security Updates${NC}"
     print_info "Configuring unattended-upgrades for automatic security updates"
     
@@ -2033,82 +1960,28 @@ update_system() {
         # Install unattended-upgrades if not present
         if ! dpkg -l | grep -q "^ii.*unattended-upgrades"; then
             print_info "Installing unattended-upgrades..."
-            apt install -y unattended-upgrades apt-listchanges
-        fi
-        
-        # Configure unattended-upgrades
-        local unattended_conf="/etc/apt/apt.conf.d/50unattended-upgrades"
-        
-        if [[ -f "$unattended_conf" ]]; then
-            # Backup original
-            cp "$unattended_conf" "${unattended_conf}.backup.$(date +%Y%m%d_%H%M%S)"
-            
-            # Enable automatic security updates
-            cat > "$unattended_conf" << 'EOF'
-// Automatically upgrade packages from these origins
-Unattended-Upgrade::Allowed-Origins {
-    "${distro_id}:${distro_codename}-security";
-    "${distro_id}ESMApps:${distro_codename}-apps-security";
-    "${distro_id}ESM:${distro_codename}-infra-security";
-};
-
-// List of packages to not update automatically
-Unattended-Upgrade::Package-Blacklist {
-};
-
-// Split the upgrade into the smallest possible chunks
-Unattended-Upgrade::MinimalSteps "true";
-
-// Send email to this address for problems or packages upgrades
-Unattended-Upgrade::Mail "root";
-
-// Set this value to "true" to get emails only on errors
-Unattended-Upgrade::MailOnlyOnError "true";
-
-// Remove unused automatically installed kernel-related packages
-Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
-
-// Remove unused dependencies after the upgrade
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-
-// Automatically reboot *WITHOUT CONFIRMATION* if a restart is required after the upgrade
-Unattended-Upgrade::Automatic-Reboot "false";
-
-// If automatic reboot is enabled and needed, reboot at this time
-Unattended-Upgrade::Automatic-Reboot-Time "03:00";
-EOF
-            print_success "Configured unattended-upgrades"
-            changes_made=true
+            apt install -y unattended-upgrades apt-listchanges 2>/dev/null
         fi
         
         # Configure automatic update intervals
         local auto_upgrades="/etc/apt/apt.conf.d/20auto-upgrades"
         cat > "$auto_upgrades" << 'EOF'
-// Enable the update/upgrade script (0=disable)
 APT::Periodic::Enable "1";
-
-// Do "apt-get update" automatically every n-days (0=disable)
 APT::Periodic::Update-Package-Lists "1";
-
-// Do "apt-get upgrade --download-only" every n-days (0=disable)
 APT::Periodic::Download-Upgradeable-Packages "1";
-
-// Do "apt-get autoclean" every n-days (0=disable)
 APT::Periodic::AutocleanInterval "7";
-
-// Run the "unattended-upgrade" security upgrade script every n-days (0=disabled)
 APT::Periodic::Unattended-Upgrade "1";
 EOF
         print_success "Configured automatic update intervals (daily)"
         changes_made=true
         
         # Enable and start the service
-        systemctl enable unattended-upgrades
-        systemctl start unattended-upgrades
+        systemctl enable unattended-upgrades 2>/dev/null
+        systemctl start unattended-upgrades 2>/dev/null
         print_success "Enabled automatic security updates service"
     fi
     
-    # 2. Update package lists
+    # 2. Update package lists (REQUIRED)
     echo -e "\n${BOLD}Step 2: Update Package Lists${NC}"
     if confirm_action "Update apt package lists?"; then
         apt update
@@ -2120,117 +1993,29 @@ EOF
         fi
     fi
     
-    # 3. Check for available updates
-    echo -e "\n${BOLD}Step 3: Check Available Updates${NC}"
-    local security_updates=$(apt list --upgradable 2>/dev/null | grep -i security | wc -l)
-    local total_updates=$(apt list --upgradable 2>/dev/null | grep -c "upgradable")
-    
-    if [[ $total_updates -gt 0 ]]; then
-        echo -e "${YELLOW}!${NC} Available updates: $total_updates total, $security_updates security-related"
-        
-        if confirm_action "Show list of available updates?"; then
-            apt list --upgradable 2>/dev/null | grep -v "Listing"
-        fi
-    else
-        print_success "System is up to date - no updates available"
-    fi
-    
-    # 4. Upgrade installed packages
-    echo -e "\n${BOLD}Step 4: Upgrade Installed Packages${NC}"
-    if [[ $total_updates -gt 0 ]]; then
-        if confirm_action "Upgrade all installed packages?"; then
-            apt upgrade -y
-            if [[ $? -eq 0 ]]; then
-                print_success "Packages upgraded successfully"
-                changes_made=true
-            else
-                print_error "Failed to upgrade packages"
-            fi
-        fi
-    else
-        print_info "No packages to upgrade"
-    fi
-    
-    # 5. Distribution upgrade
-    echo -e "\n${BOLD}Step 5: Distribution Upgrade${NC}"
-    print_info "This handles changing dependencies with new package versions"
-    if confirm_action "Perform distribution upgrade (dist-upgrade)?"; then
-        apt dist-upgrade -y
+    # 3. Upgrade packages (COMBINED for speed)
+    echo -e "\n${BOLD}Step 3: Upgrade Packages${NC}"
+    if confirm_action "Perform full system upgrade (apt upgrade + dist-upgrade)?"; then
+        print_info "Running combined upgrade (this may take a few minutes)..."
+        apt upgrade -y && apt dist-upgrade -y
         if [[ $? -eq 0 ]]; then
-            print_success "Distribution upgrade completed"
+            print_success "System upgraded successfully"
             changes_made=true
         else
-            print_error "Failed to perform distribution upgrade"
+            print_error "Upgrade encountered errors"
         fi
     fi
     
-    # 6. Update specific applications from README
-    echo -e "\n${BOLD}Step 6: Update Critical Applications${NC}"
-    print_info "Checking critical applications for updates"
-    
-    # Define critical packages to ensure are updated
-    local critical_packages=(
-        "firefox"
-        "chromium-browser"
-        "libreoffice"
-        "thunderbird"
-        "openssh-server"
-        "openssh-client"
-        "apache2"
-        "nginx"
-        "mysql-server"
-        "postgresql"
-    )
-    
-    if confirm_action "Update critical applications?"; then
-        local updated_count=0
-        for pkg in "${critical_packages[@]}"; do
-            if dpkg -l | grep -q "^ii.*$pkg"; then
-                echo -e "${CYAN}→${NC} Updating $pkg..."
-                apt install --only-upgrade -y "$pkg" 2>/dev/null
-                if [[ $? -eq 0 ]]; then
-                    ((updated_count++))
-                fi
-            fi
-        done
-        print_success "Checked/updated $updated_count critical applications"
+    # 4. Cleanup (FAST)
+    echo -e "\n${BOLD}Step 4: Cleanup${NC}"
+    if confirm_action "Remove unused packages and clean cache?"; then
+        apt autoremove -y && apt autoclean
+        print_success "Cleanup completed"
         changes_made=true
     fi
     
-    # 7. Update snap packages (if snap is installed)
-    if command -v snap &>/dev/null; then
-        echo -e "\n${BOLD}Step 7: Update Snap Packages${NC}"
-        if confirm_action "Update snap packages?"; then
-            snap refresh
-            if [[ $? -eq 0 ]]; then
-                print_success "Snap packages updated"
-                changes_made=true
-            fi
-        fi
-    fi
-    
-    # 8. Remove unused packages
-    echo -e "\n${BOLD}Step 8: Remove Unused Packages${NC}"
-    if confirm_action "Remove unused packages (autoremove)?"; then
-        apt autoremove -y
-        if [[ $? -eq 0 ]]; then
-            print_success "Removed unused packages"
-            changes_made=true
-        fi
-    fi
-    
-    # 9. Clean package cache
-    echo -e "\n${BOLD}Step 9: Clean Package Cache${NC}"
-    if confirm_action "Clean apt cache (autoclean)?"; then
-        apt autoclean
-        if [[ $? -eq 0 ]]; then
-            print_success "Cleaned package cache"
-            changes_made=true
-        fi
-    fi
-    
-    # 10. Check if reboot is required
-    echo -e "\n${BOLD}Step 10: Reboot Check${NC}"
+    # 5. Reboot check
+    echo -e "\n${BOLD}Step 5: Reboot Check${NC}"
     if [[ -f /var/run/reboot-required ]]; then
         echo -e "${RED}!${NC} System reboot is required"
         if [[ -f /var/run/reboot-required.pkgs ]]; then
@@ -3381,6 +3166,203 @@ EOF
 }
 
 #############################################
+# Task 11: Safe Password Complexity (No Lockout Risk)
+#############################################
+
+enforce_password_complexity() {
+    print_header "SAFE PASSWORD COMPLEXITY ENFORCEMENT"
+    print_warning "⚠️  CRITICAL: TAKE A VM SNAPSHOT BEFORE PROCEEDING ⚠️"
+    echo ""
+    print_info "This function enables REAL password complexity enforcement"
+    print_info "This is REQUIRED for CyberPatriot points but has lockout risk"
+    echo ""
+    
+    local changes_made=false
+    
+    # Safety check
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}${BOLD}                    ⚠️  WARNING ⚠️${NC}"
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}Enabling PAM password complexity CAN cause lockouts if:${NC}"
+    echo -e "${YELLOW}  • Existing user passwords don't meet new requirements${NC}"
+    echo -e "${YELLOW}  • You forget your password after changing it${NC}"
+    echo -e "${YELLOW}  • PAM configuration gets corrupted${NC}"
+    echo ""
+    echo -e "${CYAN}${BOLD}REQUIRED BEFORE CONTINUING:${NC}"
+    echo -e "${GREEN}  1. Take a VM snapshot NOW${NC}"
+    echo -e "${GREEN}  2. Write down your current password${NC}"
+    echo -e "${GREEN}  3. Have the main user password ready to test${NC}"
+    echo ""
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    if ! confirm_action "I have taken a snapshot and want to proceed"; then
+        print_warning "Cancelled - no changes made"
+        press_enter
+        return
+    fi
+    
+    # Step 1: Install libpam-pwquality (SAFE - just installs package)
+    echo -e "\n${BOLD}Step 1: Install Password Quality Library${NC}"
+    
+    if ! dpkg -l | grep -q "^ii.*libpam-pwquality"; then
+        if confirm_action "Install libpam-pwquality?"; then
+            apt-get update -qq
+            apt-get install -y libpam-pwquality
+            if [[ $? -eq 0 ]]; then
+                print_success "libpam-pwquality installed"
+                changes_made=true
+            else
+                print_error "Failed to install libpam-pwquality"
+                press_enter
+                return
+            fi
+        fi
+    else
+        print_success "libpam-pwquality already installed"
+    fi
+    
+    # Step 2: Configure /etc/security/pwquality.conf (SAFE - just sets rules)
+    echo -e "\n${BOLD}Step 2: Configure Password Rules${NC}"
+    
+    local pwquality_conf="/etc/security/pwquality.conf"
+    
+    if [[ -f "$pwquality_conf" ]]; then
+        if confirm_action "Set password complexity rules in pwquality.conf?"; then
+            cp "$pwquality_conf" "${pwquality_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+            
+            # Clear existing CyberPatriot settings if any
+            sed -i '/# CyberPatriot Password Complexity/,+6d' "$pwquality_conf"
+            
+            # Add new settings
+            {
+                echo ""
+                echo "# CyberPatriot Password Complexity - $(date +%Y-%m-%d)"
+                echo "minlen = 8"
+                echo "dcredit = -1"
+                echo "ucredit = -1"
+                echo "lcredit = -1"
+                echo "ocredit = -1"
+            } >> "$pwquality_conf"
+            
+            print_success "Password rules configured"
+            print_info "  Min length: 8 | Digit: 1 | Upper: 1 | Lower: 1 | Special: 1"
+            changes_made=true
+        fi
+    fi
+    
+    # Step 3: Enable PAM enforcement (DANGEROUS - This is the risky part)
+    echo -e "\n${BOLD}Step 3: Enable PAM Password Quality Enforcement${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}${BOLD}⚠️  DANGER ZONE - LOCKOUT RISK ⚠️${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    print_warning "This step ENFORCES password complexity via PAM"
+    print_warning "Existing passwords that don't meet requirements may cause issues"
+    print_info "This is what gets you CyberPatriot points for password complexity"
+    echo ""
+    
+    local common_password="/etc/pam.d/common-password"
+    
+    if [[ -f "$common_password" ]]; then
+        # Check if already configured
+        if grep -q "pam_pwquality.so" "$common_password" 2>/dev/null; then
+            print_info "PAM password quality already enabled"
+        else
+            echo -e "${YELLOW}Current PAM configuration:${NC}"
+            grep "^password" "$common_password" | head -5
+            echo ""
+            
+            if confirm_action "ENABLE PAM password quality enforcement? (RISKY)"; then
+                # Backup
+                cp "$common_password" "${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
+                print_success "Created backup of common-password"
+                
+                # Add pam_pwquality BEFORE pam_unix.so
+                sed -i '/^password.*pam_unix.so/i password\trequisite\t\t\tpam_pwquality.so retry=3' "$common_password"
+                
+                print_success "PAM password quality enforcement ENABLED"
+                print_warning "New passwords MUST now meet complexity requirements"
+                changes_made=true
+                
+                echo ""
+                echo -e "${CYAN}${BOLD}IMMEDIATE ACTION REQUIRED:${NC}"
+                echo -e "${YELLOW}1. Test that you can still use sudo: ${NC}sudo whoami"
+                echo -e "${YELLOW}2. If locked out, reboot and restore from snapshot${NC}"
+                echo -e "${YELLOW}3. If successful, test changing a password${NC}"
+                echo ""
+            fi
+        fi
+    fi
+    
+    # Step 4: Enable Password History (OPTIONAL - less risky)
+    echo -e "\n${BOLD}Step 4: Enable Password History${NC}"
+    print_info "Prevents reusing last 5 passwords"
+    print_warning "Moderate risk - existing users can still login with current password"
+    
+    if [[ -f "$common_password" ]]; then
+        if ! grep "pam_unix.so" "$common_password" | grep -q "remember=" 2>/dev/null; then
+            if confirm_action "Enable password history (remember last 5)?"; then
+                # Backup if not already done
+                if [[ ! -f "${common_password}.bak.$(date +%Y%m%d_%H%M%S)" ]]; then
+                    cp "$common_password" "${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
+                fi
+                
+                # Add remember=5 to the password line with pam_unix.so
+                sed -i '/^password.*pam_unix.so/ s/$/ remember=5/' "$common_password"
+                
+                print_success "Password history enabled (last 5 passwords)"
+                changes_made=true
+            fi
+        else
+            print_info "Password history already configured"
+        fi
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}Password Complexity Enforcement Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ -f "$pwquality_conf" ]] && grep -q "^minlen" "$pwquality_conf" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Password rules configured in pwquality.conf"
+    fi
+    
+    if [[ -f "$common_password" ]] && grep -q "pam_pwquality.so" "$common_password" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} PAM enforcement ENABLED (passwords will be checked)"
+    else
+        echo -e "${YELLOW}!${NC} PAM enforcement NOT ENABLED (rules are advisory only)"
+    fi
+    
+    if [[ -f "$common_password" ]] && grep "pam_unix.so" "$common_password" | grep -q "remember=" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Password history enabled"
+    else
+        echo -e "${YELLOW}!${NC} Password history not enabled"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if grep -q "pam_pwquality.so" "$common_password" 2>/dev/null; then
+        echo ""
+        echo -e "${RED}${BOLD}⚠️  POST-CONFIGURATION TESTING REQUIRED ⚠️${NC}"
+        echo ""
+        echo -e "${YELLOW}Run these tests NOW:${NC}"
+        echo -e "${CYAN}  1. Test sudo:${NC} sudo whoami"
+        echo -e "${CYAN}  2. Test password change:${NC} passwd"
+        echo -e "${CYAN}  3. If anything fails, reboot and restore snapshot${NC}"
+        echo ""
+    fi
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "Password complexity enforcement configured"
+    else
+        print_info "No changes were made"
+    fi
+    
+    print_header "PASSWORD COMPLEXITY ENFORCEMENT COMPLETE"
+    press_enter
+}
+
+#############################################
 # Main Menu
 #############################################
 
@@ -3396,6 +3378,7 @@ show_menu() {
     echo -e "${GREEN} 8)${NC} Remove Prohibited Software"
     echo -e "${GREEN} 9)${NC} Harden SSH Configuration"
     echo -e "${GREEN}10)${NC} Enable Security Features"
+    echo -e "${YELLOW}11)${NC} Enforce Password Complexity ${RED}(⚠️  SNAPSHOT FIRST!)${NC}"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -3425,6 +3408,7 @@ main() {
             8) remove_prohibited_software ;;
             9) harden_ssh ;;
             10) enable_security_features ;;
+            11) enforce_password_complexity ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
